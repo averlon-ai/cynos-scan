@@ -1,0 +1,44 @@
+{
+  "name": "@averlon-ai/cynos",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Scan a repository for security issues on your own machine: upstream Codex Security through cynos, with a knowledge base",
+  "type": "module",
+  "bin": {
+    "cynos": "dist/cynos.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^22.13.0 || ^24.0.0 || ^26.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/averlon-ai/cynos-scan.git",
+    "directory": "packages/cli"
+  },
+  "scripts": {
+    "build": "bun build src/main.ts --target node --format esm --outfile dist/cynos.mjs --external @openai/codex-security && rm -rf dist/assets && cp -R ../engine/assets dist/assets",
+    "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit -p .",
+    "test": "bun test",
+    "lint": "eslint src",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "@openai/codex-security": "0.9.1"
+  },
+  "devDependencies": {
+    "@averlon-ai/cynos-scan-engine": "workspace:*",
+    "@clack/prompts": "1.8.1",
+    "@types/bun": "1.2.17",
+    "@types/node": "^26.6.6",
+    "commander": "15.0.0",
+    "picocolors": "1.1.1"
+  }
+}

@@ -1,0 +1,45 @@
+name: Workflow quality
+
+# The workflows and scripts themselves, checked as code (from openai/codex-security's
+# workflow-quality.yml): actionlint for workflow syntax and expressions, shellcheck for the
+# scripts (warnings and errors), and zizmor for workflow security. zizmor fails an action not
+# pinned to a commit, a `${{ }}` expanded into a shell, and a checkout that keeps its
+# credentials. Every tool is pinned: actionlint by its release's sha256, shellcheck and zizmor by
+# install-action's checksummed manifests.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: actionlint, shellcheck, zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck and zizmor
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: shellcheck@0.11.0,zizmor@1.31.1
+      - name: Install actionlint
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/actionlint" actionlint
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+      - name: actionlint
+        run: actionlint -color
+      - name: shellcheck
+        env:
+          SHELLCHECK_OPTS: --severity=warning
+        run: shellcheck scripts/*.sh packages/engine/assets/*.sh
+      - name: zizmor
+        run: zizmor --offline --min-severity medium --format github --config .github/zizmor.yml .github

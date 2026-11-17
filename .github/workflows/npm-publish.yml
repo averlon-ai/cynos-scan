@@ -1,0 +1,65 @@
+name: Stage npm release
+
+# Only a deliberate dispatch from main can request a release. Build jobs have no OIDC
+# permission; the protected publish job consumes only this run's tested tarballs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.repository == 'averlon-ai/cynos-scan' && github.ref == 'refs/heads/main' && github.event.repository.visibility == 'public'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    if: github.repository == 'averlon-ai/cynos-scan' && github.ref == 'refs/heads/main' && github.event.repository.visibility == 'public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # No checkout, dependency installation, package scripts, or shared cache in this job.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.12.1'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-packages-${{ github.run_attempt }}
+          path: dist
+      - name: Verify the tarballs
+        working-directory: dist
+        run: |
+          sha256sum --check SHA256SUMS
+          node --input-type=module <<'JS'
+          import { readdirSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const files = readdirSync('.').filter(name => name.endsWith('.tgz'));
+          const expected = new Set(['@averlon-ai/cynos', '@averlon-ai/cynos-scan-engine']);
+          const versions = new Set();
+          if (files.length !== 2) throw new Error('Expected exactly two packages');
+          for (const file of files) {
+            const pkg = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
+            if (!expected.delete(pkg.name) || pkg.repository?.url !== 'git+https://github.com/averlon-ai/cynos-scan.git' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org' || pkg.publishConfig?.access !== 'public') {
+              throw new Error('Unexpected package identity or registry');
+            }
+            versions.add(pkg.version);
+          }
+          if (expected.size || versions.size !== 1) throw new Error('Package versions must match');
+          JS
+      - name: Stage packages using npm trusted publishing
+        # npm's trusted publisher must allow staging only. A maintainer approves with 2FA
+        # on npm after reviewing the version, provenance, and tarball hashes.
+        working-directory: dist
+        run: |
+          npm stage publish ./averlon-ai-cynos-scan-engine-*.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org --provenance
+          npm stage publish ./averlon-ai-cynos-[0-9]*.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org --provenance

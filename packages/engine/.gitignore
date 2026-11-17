@@ -1,0 +1,2 @@
+# End-to-end scans keep their stage, state dir and fixture repository here.
+.e2e/
