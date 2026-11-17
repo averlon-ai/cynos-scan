@@ -1,0 +1,7 @@
+# zizmor's exceptions, each with the reason it is safe.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Every action is pinned to a commit, ours included: a tag or a branch can be moved.
+        '*': hash-pin
