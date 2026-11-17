@@ -60,6 +60,14 @@ jobs:
         # npm's trusted publisher must allow staging only. A maintainer approves with 2FA
         # on npm after reviewing the version, provenance, and tarball hashes.
         working-directory: dist
+        env:
+          # npm otherwise hides OIDC exchange failures behind a generic ENEEDAUTH error.
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
+          node --input-type=module <<'JS'
+          for (const name of ['ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN']) {
+            if (!process.env[name]) throw new Error(`GitHub did not provide ${name}; check id-token: write permissions`);
+          }
+          JS
           npm stage publish ./averlon-ai-cynos-scan-engine-*.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org --provenance
           npm stage publish ./averlon-ai-cynos-[0-9]*.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org --provenance
