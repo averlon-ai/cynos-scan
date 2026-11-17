@@ -31,7 +31,7 @@ bun install --frozen-lockfile
 bun run build
 mkdir -p dist
 npm pack --workspace @averlon-ai/cynos --pack-destination dist
-npm install --global ./dist/averlon-ai-cynos-0.1.0.tgz
+npm install --global ./dist/averlon-ai-cynos-0.1.1.tgz
 ```
 
 Use the version in `packages/cli/package.json` when selecting the tarball.

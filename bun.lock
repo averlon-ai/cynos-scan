@@ -19,7 +19,7 @@
     },
     "packages/cli": {
       "name": "@averlon-ai/cynos",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "bin": {
         "cynos": "dist/cynos.mjs",
       },
@@ -37,7 +37,7 @@
     },
     "packages/engine": {
       "name": "@averlon-ai/cynos-scan-engine",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@openai/codex-security": "0.9.1",
       },
