@@ -29,13 +29,17 @@ import {
   type DiffBuildPlan,
 } from '../knowledge-base/diff';
 import { diffBriefing, diffTaskName } from '../knowledge-base/diff-briefing';
-import { saveReview } from '../knowledge-base/stored-review';
+import { loadReview, saveReview } from '../knowledge-base/stored-review';
+import { productRows } from '../knowledge-base/briefing';
+import { inventory } from '../knowledge-base/inventory';
+import { labelRepository } from '../knowledge-base/plan';
 import type { FunctionNode } from '../knowledge-base/code-graph';
 import { DockerRuntime, DOCKER_PATHS } from '../runtime/docker';
 import { bundledPluginRoot } from '../upstream';
 import {
   decisionFor,
   fakeFetch,
+  fakeGraphTool,
   fakeServer,
   gitCheckout,
   gitCommit,
@@ -784,16 +788,18 @@ const CHANGE = {
 };
 
 /** The graph at HEAD, as the fake server answers its queries. */
-const graphAnswer = (tool: string, args: Record<string, unknown>): unknown => {
-  if (tool === 'index_repository') return { project: 'scan', status: 'indexed' };
-  const query = String(args['query']);
-  const scan = (qn: string) => `scan.${qn}`;
-  if (query.includes('CALL_REFERENCE'))
-    return { rows: ZDR.references.map(([a, b]) => [scan(a), scan(b), 'server/internalslm.py']) };
-  if (query.includes('CALLS'))
-    return { rows: ZDR.calls.map(([a, b]) => [scan(a), scan(b), 'x.py']) };
-  return { rows: ZDR.functions.map(f => [scan(f.qn), f.name, f.path, f.start, f.end]) };
-};
+const graphAnswer = fakeGraphTool({
+  index: { project: 'scan', status: 'indexed' },
+  functions: ZDR.functions.map(f => ({ ...f, qn: `scan.${f.qn}` })),
+  calls: ZDR.calls.map(([a, b]) => edge(a, b, 'x.py')),
+  callReferences: ZDR.references.map(([a, b]) => edge(a, b, 'server/internalslm.py')),
+});
+
+/** An edge of the fixture's graph at HEAD, its caller's file looked up among its functions. */
+function edge(caller: string, callee: string, calleePath: string) {
+  const callerPath = ZDR.functions.find(f => f.qn === caller)?.path ?? 'x.py';
+  return { caller: `scan.${caller}`, callerPath, callee: `scan.${callee}`, calleePath };
+}
 
 /** Jev: handle is the entry point, nothing performs a sensitive operation, no secrets. */
 const jev = (name: string, state: Record<string, unknown>) => {
@@ -816,7 +822,9 @@ async function buildFixture(
   /** The commit the stored review names, when not the fixture's own (another repository's). */
   storedSha?: string,
   /** A commit between the stored review's and the diff's base: an earlier diff's change. */
-  between?: Record<string, string | null>
+  between?: Record<string, string | null>,
+  /** The architecture reviewer answers with no JSON, so every review fails. */
+  reviewFails = false
 ) {
   const project = gitCheckout(BASE_FILES);
   const reviewed = gitHead(project);
@@ -830,11 +838,14 @@ async function buildFixture(
   const commands: string[][] = [];
   const logs: string[] = [];
   const steps: string[] = [];
+  const bodies: Record<string, unknown>[] = [];
   const fetchImpl = fakeFetch((url, body) => {
     if (!url.endsWith('/chat/completions')) return decisionFor(body, jev);
     const [system, user] = (body['messages'] as { content: string }[]).map(m => m.content);
     chats.push({ system: system ?? '', user: user ?? '' });
-    const answer = system?.includes('You split the security review')
+    const designing = system?.includes('You split the security review');
+    if (reviewFails && !designing) return { choices: [{ message: { content: 'no review' } }] };
+    const answer = designing
       ? {
           packets: [
             {
@@ -866,7 +877,7 @@ async function buildFixture(
           resolvedQuestions: [],
         };
     return { choices: [{ message: { content: JSON.stringify(answer) } }] };
-  });
+  }, bodies);
   const plan: DiffBuildPlan = {
     name: 'cs-test-knowledge-base',
     project,
@@ -877,6 +888,7 @@ async function buildFixture(
     reviewAgent: false,
     cacheDir,
     base,
+    head: gitHead(project),
     plugin: () => bundledPluginRoot(),
     step: (step, message) => steps.push(`${step}: ${message}`),
   };
@@ -891,7 +903,23 @@ async function buildFixture(
   );
   const kb = join(work, KNOWLEDGE_BASE_INDEX);
   const read = (path: string) => readFileSync(path, 'utf8');
-  return { summary, work, kb, chats, servers, commands, read, base, logs, steps };
+  // Jev's decision requests, as the cache keys them (cynos.ts decide).
+  const decisions = bodies.filter(b => 'questions' in b);
+  return {
+    summary,
+    work,
+    kb,
+    chats,
+    servers,
+    commands,
+    read,
+    base,
+    logs,
+    steps,
+    project,
+    cacheDir,
+    decisions,
+  };
 }
 
 describe('buildDiffKnowledgeBase', () => {
@@ -958,9 +986,7 @@ describe('buildDiffKnowledgeBase', () => {
     const index = read(join(work, KNOWLEDGE_BASE_OUTPUT, 'code-graph.md'));
     expect(index).toContain('| packet_zdr | zdr |');
     expect(index).toContain('| diff_baseline | diff-baseline |');
-    expect(index).toContain(
-      'updated for this change because server/internalslm.py (modified) is cited'
-    );
+    expect(index).toContain('## Threat model\n\nUse it unchanged.\n');
     expect(index).not.toContain('==> ');
     expect(readdirSync(kb).sort()).toEqual(['files.tsv', 'functions.tsv', 'kb', 'packets']);
   });
@@ -1054,13 +1080,79 @@ describe('buildDiffKnowledgeBase', () => {
     expect(steps).toContain('packets: 1 packets: zdr');
   });
 
-  it("fails without a full scan's threat model, or with another repository's", async () => {
-    await expect(buildFixture(undefined)).rejects.toThrow(
-      "no full scan's threat model is stored for this repository: run a full scan first"
+  it("builds the threat model of the whole repository at HEAD without a full scan's, and stores it", async () => {
+    const { summary, work, cacheDir, project, read, logs, steps } = await buildFixture(undefined);
+    const head = gitHead(project);
+
+    // Built from scratch, not updated: no gate, the review's own numbers.
+    expect(summary.threat_model).toMatchObject({
+      from: { source: 'built', sha: head, cut: 0, redacted: 0 },
+      gate: [],
+      updated: false,
+    });
+    expect(summary.threat_model.review?.mode).toBe('single');
+    expect(logs).toContain(
+      "no full scan's threat model is stored: this diff builds one of the whole repository"
     );
-    await expect(buildFixture(reviewOf([]), CHANGE, 'f'.repeat(40))).rejects.toThrow(
-      `the stored threat model is of ${'f'.repeat(12)}, which is not in this checkout's history`
+    expect(steps).toContain(
+      "threat-model: threat model built: no full scan's threat model was stored"
     );
+
+    // The diff goes on: the threat model, the index and the packets are written as with a stored one.
+    const tm = JSON.parse(read(join(work, KNOWLEDGE_BASE_OUTPUT, 'threat-model.json')));
+    expect(tm.threatModel.summary).toBe('A gateway.');
+    const index = read(join(work, KNOWLEDGE_BASE_OUTPUT, 'code-graph.md'));
+    expect(index).toContain('## Threat model\n\nUse it unchanged.\n');
+    expect(summary.briefs.map(b => b.id)).toContain('zdr');
+
+    // Stored as HEAD's, so the next diff of this branch starts from it.
+    expect(loadReview(cacheDir)).toMatchObject({ sha: head, review: tm });
+  });
+
+  it("builds the threat model when the stored one is of a commit outside this checkout's history", async () => {
+    const { summary, logs } = await buildFixture(reviewOf([]), CHANGE, 'f'.repeat(40));
+    expect(summary.threat_model.from.source).toBe('built');
+    expect(logs).toContain(
+      `the stored threat model is of ${'f'.repeat(12)}, which is not in this checkout's history: this diff builds one of the whole repository`
+    );
+  });
+
+  it("labels the repository with a full scan's own requests, so a full scan's cache answers them", async () => {
+    const { project, decisions } = await buildFixture(undefined);
+    // What a full scan of this checkout asks Jev for its labels (index.ts, plan.ts labelRepository).
+    const asked: Record<string, unknown>[] = [];
+    const rows = inventory(project);
+    const product = productRows(rows).filter(r => r.text);
+    await labelRepository(
+      new CynosDecisions(
+        'k',
+        5,
+        fakeFetch((_, body) => decisionFor(body, jev), asked),
+        async () => {}
+      ),
+      {
+        rows,
+        product,
+        functions: ZDR.functions,
+        calls: ZDR.calls,
+        tokens: new Map(product.map(r => [r.path, 1])),
+      },
+      () => {}
+    );
+    const diffAsked = new Set(decisions.map(b => JSON.stringify(b)));
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.filter(b => !diffAsked.has(JSON.stringify(b)))).toEqual([]);
+  });
+
+  it('reads a stored threat model as stored, and stores nothing', async () => {
+    const { summary, cacheDir, base } = await buildFixture(reviewOf([]));
+    expect(summary.threat_model.from).toMatchObject({ source: 'stored', sha: base });
+    expect(loadReview(cacheDir)?.sha).toBe(base);
+  });
+
+  it('fails when the threat model it builds fails, since a diff scan needs one', async () => {
+    const failing = buildFixture(undefined, CHANGE, undefined, undefined, true);
+    await expect(failing).rejects.toThrow(/review/i);
   });
 
   it('keeps the key in this process', async () => {
@@ -1103,7 +1195,6 @@ describe('the diff baseline brief', () => {
       sinks: new Map(),
       secretWindows: [],
       review: reviewOf([]),
-      threatModel: { from: 'a'.repeat(40), gate: [], updated: false },
     });
     const brief = kb.files.get(`packets/${DIFF_BASELINE}.md`) ?? '';
     expect(brief).toContain(`git -C '/Users/dev/my repo; it'\\''s' diff ${'a'.repeat(40)} HEAD`);
@@ -1133,7 +1224,6 @@ describe('the diff baseline brief', () => {
       sinks: new Map(),
       secretWindows: [{ path, start: 1, end: 120 }],
       review: reviewOf([]),
-      threatModel: { from: 'a'.repeat(40), gate: [], updated: false },
     });
     const brief = kb.files.get(`packets/${DIFF_BASELINE}.md`) ?? '';
     expect(brief).toContain(`sh /scan/kb/kb read 'notes/my secrets; rm -rf ~.txt:1-120'`);

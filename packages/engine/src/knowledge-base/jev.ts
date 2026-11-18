@@ -52,20 +52,32 @@ export type Answers = Record<string, Answer>;
 
 export class CostCapReached extends Error {}
 
-/** The text split on line boundaries into pieces that fit one Jev call. */
+/**
+ * The text split into pieces that fit one Jev call, on line boundaries where it can be. A line
+ * longer than one call (a minified script, a regenerated document on one line) is cut within the
+ * line, so every character of the text reaches some chunk: the chunks joined are the text.
+ */
 export function chunks(text: string): string[] {
   if (text.length <= MAX_STATE_CHARS) return [text];
   const out: string[] = [];
   let current = '';
-  for (const line of text.split(/(?<=\n)/)) {
-    if (current && current.length + line.length > MAX_STATE_CHARS) {
+  for (const piece of text.split(/(?<=\n)/).flatMap(linePieces)) {
+    if (current && current.length + piece.length > MAX_STATE_CHARS) {
       out.push(current);
       current = '';
     }
-    current += line.slice(0, MAX_STATE_CHARS);
+    current += piece;
   }
   if (current) out.push(current);
   return out;
+}
+
+/** One line cut into pieces of at most MAX_STATE_CHARS, the whole line when it fits. */
+function linePieces(line: string): string[] {
+  const pieces: string[] = [];
+  for (let start = 0; start < line.length; start += MAX_STATE_CHARS)
+    pieces.push(line.slice(start, start + MAX_STATE_CHARS));
+  return pieces;
 }
 
 /**
@@ -97,12 +109,21 @@ export function mergeAnswers(parts: Answers[]): Answers {
   return out;
 }
 
-/** A state whose `content` is a string larger than one call is asked in chunks. */
+/**
+ * The fields that hold a state's text: a file's `content`, and the `code` of a function or of the
+ * lines a hunk removed (diff.ts's removedCode), which has no size of its own: one hunk of a
+ * regenerated document removed 256 KB, and cynos refuses a decision past 256 KiB.
+ */
+const TEXT_FIELDS = ['content', 'code'] as const;
+
+/** A state whose text is a string larger than one call is asked in chunks. */
 function chunked(state: unknown): unknown[] {
   if (typeof state === 'string') return chunks(state).map(content => ({ content }));
-  const content = (state as { content?: unknown } | null)?.content;
-  if (typeof content === 'string' && content.length > MAX_STATE_CHARS)
-    return chunks(content).map(part => ({ ...(state as object), content: part }));
+  for (const field of TEXT_FIELDS) {
+    const text = (state as Record<string, unknown> | null)?.[field];
+    if (typeof text === 'string' && text.length > MAX_STATE_CHARS)
+      return chunks(text).map(part => ({ ...(state as object), [field]: part }));
+  }
   return [state];
 }
 

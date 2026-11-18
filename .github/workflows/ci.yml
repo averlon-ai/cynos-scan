@@ -92,9 +92,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  windows-install:
+    needs: package
+    uses: ./.github/workflows/install-smoke.yml
+    with:
+      artifact: npm-packages-${{ github.run_attempt }}
+
   ci:
     name: ci
-    needs: [workflow-quality, test, package]
+    needs: [workflow-quality, test, package, windows-install]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

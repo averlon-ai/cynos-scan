@@ -40,6 +40,7 @@ import {
   type KnowledgeBaseSummary,
   type ScanKind,
 } from './knowledge-base';
+import { inHistory } from './knowledge-base/diff';
 import type { KnowledgeBaseStore } from './knowledge-base/store';
 import type { ReuseStats } from './knowledge-base/stored-review';
 import {
@@ -626,7 +627,9 @@ async function buildKnowledge(
     'Building the knowledge base: code graph, Jev labels, architecture review, packet design, helper briefs.'
   );
   const restored =
-    store && cacheDir ? await store.restore(cacheDir, config.scannedSha, []) : undefined;
+    store && cacheDir
+      ? await store.restore(cacheDir, config.scannedSha, [], ancestorOf(config))
+      : undefined;
   let summary: KnowledgeBaseSummary;
   try {
     summary = await buildKnowledgeBase(
@@ -675,23 +678,45 @@ async function buildKnowledge(
         reasoning_output_tokens: 0,
       },
     });
-  // The cache holds answers and the graph, never a key; checked like every published file,
-  // whatever the store.
-  if (store && cacheDir) {
-    if (keys.all.some(k => k && filesContaining(cacheDir, k).length))
-      io.warn('A key was found in the knowledge-base cache; it is not saved.');
-    else await store.save(cacheDir, config.scannedSha, restored);
-  }
+  if (store && cacheDir)
+    await saveKnowledgeBase(store, cacheDir, config.scannedSha, restored, keys, io);
   return { summary, diffThreatModel: undefined };
+}
+
+/**
+ * Whether a snapshot's commit is in the checkout's history, for the store's restore: a diff can
+ * update an ancestor's review, and its answers are of the files this checkout has.
+ */
+function ancestorOf(config: ScanConfig): (sha: string) => boolean {
+  return sha => inHistory(config.project, sha);
+}
+
+/**
+ * Saves the knowledge-base cache as this commit's snapshot. The cache holds answers, graphs and the
+ * review, never a key; it is checked like every published file, whatever the store.
+ */
+async function saveKnowledgeBase(
+  store: KnowledgeBaseStore,
+  cacheDir: string,
+  sha: string,
+  restored: string | undefined,
+  keys: Keys,
+  io: ScanIO
+): Promise<void> {
+  if (keys.all.some(k => k && filesContaining(cacheDir, k).length))
+    io.warn('A key was found in the knowledge-base cache; it is not saved.');
+  else await store.save(cacheDir, sha, restored);
 }
 
 /**
  * 3, for a diff: the change, the paths through it, the threat model brought up to date, packets
  * and briefs (knowledge-base/diff.ts). The store gives it the last full scan's review and Jev's
- * answers: the base commit's snapshot first, since that full scan stored the review. A diff never
- * saves, so it cannot shrink what the next full scan restores. As for a full scan, the prompt
- * plans the scan around the knowledge base, so a failed build, a missing stored review included,
- * fails the run.
+ * answers: the base commit's snapshot first, since that full scan stored the review. With no
+ * usable stored review the build reviews the whole repository at HEAD, and only then does a diff
+ * save, as HEAD's snapshot, so the next diff of this branch starts from that review. A diff that
+ * reused a stored review saves nothing, so it cannot shrink what the next full scan restores. As
+ * for a full scan, the prompt plans the scan around the knowledge base, so a failed build fails
+ * the run.
  */
 async function buildDiffKnowledge(
   config: ScanConfig,
@@ -703,7 +728,15 @@ async function buildDiffKnowledge(
   const store = io.knowledgeBaseStore;
   const cacheDir = store ? join(config.stage, KNOWLEDGE_BASE_CACHE_DIR) : undefined;
   const kbLog = (message: string): void => io.log(`knowledge base: ${redact(message, keys.all)}`);
-  if (store && cacheDir) await store.restore(cacheDir, config.scannedSha, [config.diffBase]);
+  // The base's snapshot first, but only an ancestor's: a base outside HEAD's history (--diff
+  // origin/main once main moved past the branch) has a review the diff cannot update, and preferring
+  // it would hide the snapshot an earlier diff of this branch saved, rebuilding on every push.
+  const inHistory = ancestorOf(config);
+  const preferred = [config.diffBase].filter(inHistory);
+  const restored =
+    store && cacheDir
+      ? await store.restore(cacheDir, config.scannedSha, preferred, inHistory)
+      : undefined;
   io.log(
     'Building the knowledge base for the change: paths, labels, threat model, packets, briefs.'
   );
@@ -716,6 +749,7 @@ async function buildDiffKnowledge(
     cynosKey: keys.cynos,
     modelCatalog: join(config.stage, MODEL_CATALOG_FILE),
     base: config.diffBase,
+    head: config.scannedSha,
     plugin: () => runtime.bundledPlugin(config.stage),
     step: (step: ScanStep, message: string, data?: JsonObject) =>
       io.progress?.({
@@ -726,6 +760,8 @@ async function buildDiffKnowledge(
         ...(data ? { data } : {}),
       }),
     ...(cacheDir ? { cacheDir } : {}),
+    // Read only when the build reviews the whole repository itself, as a full build reads it.
+    ...(config.threatModelPath ? { threatModelPath: config.threatModelPath } : {}),
     ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
     ...(io.signal ? { signal: io.signal } : {}),
   };
@@ -752,6 +788,9 @@ async function buildDiffKnowledge(
       },
     });
   const tm = diff.threat_model;
+  // A threat model built for this diff is kept, as HEAD's snapshot; a reused one is already stored.
+  if (store && cacheDir && tm.from.source === 'built')
+    await saveKnowledgeBase(store, cacheDir, config.scannedSha, restored, keys, io);
   return {
     summary: undefined,
     diff,

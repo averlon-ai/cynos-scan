@@ -39,7 +39,7 @@ import { saveReview } from './stored-review';
 import { CodeGraph, type FunctionNode, type GraphTransport, graphTransport } from './code-graph';
 import { inventory } from './inventory';
 import { CynosChat, CynosDecisions, type ReviewModel } from './cynos';
-import type { ReviewStats } from './architecture';
+import { maintainedThreatModel, type ReviewStats } from './architecture';
 import { planScan, tokens, type Repository } from './plan';
 
 export { buildDiffKnowledgeBase, type DiffBuildPlan, type DiffKnowledgeBaseSummary } from './diff';
@@ -217,13 +217,7 @@ export async function buildKnowledgeBase(
   });
 
   // 3. The plan, with the repository's own threat model when it keeps one.
-  const maintainedRow = plan.threatModelPath
-    ? rows.find(r => r.path === plan.threatModelPath)
-    : undefined;
-  const maintained =
-    maintainedRow?.text !== undefined
-      ? { path: maintainedRow.path, text: maintainedRow.text }
-      : undefined;
+  const maintained = maintainedThreatModel(rows, plan.threatModelPath);
   const agent =
     plan.reviewAgent !== false
       ? {

@@ -12,12 +12,14 @@
  * its stdin and stdout. Starting a separate CLI process for each call repeatedly starts and
  * stops the daemon; keeping one server avoids that overhead.
  *
- * Two of its behaviours shape the code here:
+ * Three of its behaviours shape the code here:
  *   - it renames a project on indexing (it collapses `--`, for one), so later queries use the
  *     name it reports back;
  *   - one response holds about a tenth of a large repository's functions, so queries are paged
  *     until `has_more` is false; a call the tool answers with an error is retried with backoff,
- *     as one can fail with no message right after indexing.
+ *     as one can fail with no message right after indexing;
+ *   - it refuses a query whose whole result reaches 100k rows, however it is paged, so a large
+ *     result is read in pieces, a set of files at a time (query()).
  */
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -25,6 +27,21 @@ import { pause } from '../processes';
 import type { RuntimeCommand, ScanPaths, ScanRuntime } from '../runtime';
 
 const PROJECT = 'scan';
+/**
+ * The tool's ceiling on one query's whole result: it refuses a result of this many rows
+ * (`CYPHER_RESULT_CEILING` in its cypher.c), whatever page size or cursor the call asks for.
+ */
+const RESULT_CAP = 100_000;
+/**
+ * The most files one piece of a larger result names. The tool tests each node it scans against the
+ * list one name at a time, so a short list keeps a piece's read cheap.
+ */
+const PIECE_FILES = 2_000;
+/**
+ * The most bytes of file names one piece names. The tool reads a request of at most 10 MiB
+ * (`MCP_MAX_MESSAGE_SIZE` in its mcp.c) and closes the connection on a longer one.
+ */
+const PIECE_BYTES = 256 * 1024;
 const ATTEMPTS = 8;
 const CALL_TIMEOUT_MS = 600_000;
 /** How long a closed server gets to exit on its own before it is killed. */
@@ -346,14 +363,108 @@ export class CodeGraph {
     return info;
   }
 
-  /** Every row of a Cypher query, page by page. */
-  async query(cypher: string): Promise<unknown[][]> {
+  /**
+   * Every row of a query, however many the graph holds.
+   *
+   * The tool evaluates a query in full before it pages the answer, and refuses one whose whole
+   * result reaches RESULT_CAP rows ("result exceeded 100k rows"): its cursor only pages a result
+   * that already fits. SKIP and LIMIT do not get past the cap either: the engine keeps the first
+   * RESULT_CAP rows before it skips, so a page past them comes back short, with no error.
+   * A large repository can exceed that limit even when each page is small.
+   *
+   * So a result that reaches the cap is read a set of files at a time. Every row belongs to one
+   * file (`query.file`: the function's, or the caller's for an edge), and the engine filters on it
+   * exactly and before it follows the pattern's edges:
+   *
+   *   count   the query's rows, `count(*)`; a result under RESULT_CAP is read whole
+   *   files   the graph's files, one File node each, packed into sets of PIECE_FILES names and
+   *           PIECE_BYTES bytes at most
+   *   pieces  each set's rows counted, `WHERE <file> IN [...]`; a set that reaches RESULT_CAP is
+   *           halved until each fits
+   *   check   the pieces' rows add up to the query's count, so no row lies outside the files
+   *   read    each piece, paged by the tool's cursor, returns the rows counted for it
+   *
+   * Every count is one group: the tool groups a `count(*)` per file by a linear search, rows times
+   * files under its 30-second deadline, and cuts a grouped value to 511 bytes, so a long path
+   * would come back as a name no filter matches. A File node's path comes back in full.
+   *
+   * A file holding RESULT_CAP rows on its own, a graph of RESULT_CAP files, or a count the reads do
+   * not match fails the build, as the refused query did: briefs built on part of the call graph
+   * would have holes.
+   */
+  private async query(query: GraphQuery): Promise<unknown[][]> {
+    const total = await this.count(query);
+    if (total < RESULT_CAP) return this.read(query, { rows: total });
+    const pieces: GraphPiece[] = [];
+    for (const files of fileSets(await this.files()))
+      pieces.push(...(await this.piecesUnderCap(query, files)));
+    // A row on a file the graph has no File node for would be in no piece.
+    const counted = pieces.reduce((sum, piece) => sum + piece.rows, 0);
+    if (counted !== total)
+      throw new Error(
+        `codebase-memory-mcp counted ${total} rows of MATCH ${query.match}, and ${counted} of them on the graph's files: the code graph cannot be read completely`
+      );
+    const rows: unknown[][] = [];
+    for (const piece of pieces) rows.push(...(await this.read(query, piece)));
+    return rows;
+  }
+
+  /**
+   * How many rows a query holds, on some files when given them. A query with no rows answers its
+   * count with no row at all, rather than a zero.
+   */
+  private async count(query: GraphQuery, files?: string[]): Promise<number> {
+    const [row] = await this.pages(pieceCypher({ ...query, returns: 'count(*)' }, files));
+    return Number(row?.[0] ?? 0);
+  }
+
+  /** The path of every file the graph holds, in full. */
+  private async files(): Promise<string[]> {
+    const files: GraphQuery = { match: '(f:File)', returns: 'f.file_path', file: 'f.file_path' };
+    const count = await this.count(files);
+    if (count >= RESULT_CAP)
+      throw new Error(
+        `codebase-memory-mcp cannot list the code graph's ${count} files: the tool refuses a result of ${RESULT_CAP} rows`
+      );
+    return (await this.pages(pieceCypher(files))).map(([path]) => String(path ?? ''));
+  }
+
+  /**
+   * A set of files as pieces under RESULT_CAP: the set itself when its rows fit, else its halves,
+   * each split again as needed. Files with no rows make no piece, and are not read.
+   */
+  private async piecesUnderCap(query: GraphQuery, files: string[]): Promise<GraphPiece[]> {
+    const rows = await this.count(query, files);
+    if (rows < RESULT_CAP) return rows ? [{ files, rows }] : [];
+    if (files.length === 1)
+      throw new Error(
+        `codebase-memory-mcp cannot read ${files[0]}: it holds ${rows} rows of the code graph, and the tool refuses a result of ${RESULT_CAP}`
+      );
+    const half = Math.ceil(files.length / 2);
+    return [
+      ...(await this.piecesUnderCap(query, files.slice(0, half))),
+      ...(await this.piecesUnderCap(query, files.slice(half))),
+    ];
+  }
+
+  /** A piece's rows; a number other than its count means the filter missed rows or caught others'. */
+  private async read(query: GraphQuery, piece: GraphPiece): Promise<unknown[][]> {
+    const rows = await this.pages(pieceCypher(query, piece.files));
+    if (rows.length !== piece.rows)
+      throw new Error(
+        `codebase-memory-mcp query_graph returned ${rows.length} rows of MATCH ${query.match} for ${piece.files ? `${piece.files.length} files` : 'every file'}, where it counted ${piece.rows}: the code graph cannot be read completely`
+      );
+    return rows;
+  }
+
+  /** Every row of one Cypher query whose whole result fits under RESULT_CAP, page by page. */
+  private async pages(query: string): Promise<unknown[][]> {
     const rows: unknown[][] = [];
     let cursor: string | undefined;
     do {
       const result = await this.call('query_graph', {
         project: this.project,
-        query: cypher,
+        query,
         format: 'json',
         max_rows: 50000,
         max_output_tokens: 200000,
@@ -373,9 +484,12 @@ export class CodeGraph {
 
   /** Every function and method defined in the repository, with its line range. */
   async functions(): Promise<FunctionNode[]> {
-    const rows = await this.query(
-      "MATCH (f) WHERE f.label IN ['Function', 'Method'] RETURN f.qualified_name, f.name, f.file_path, f.start_line, f.end_line"
-    );
+    const rows = await this.query({
+      match: '(f)',
+      where: "f.label IN ['Function', 'Method']",
+      returns: 'f.qualified_name, f.name, f.file_path, f.start_line, f.end_line',
+      file: 'f.file_path',
+    });
     const out: FunctionNode[] = [];
     for (const [qn, name, path, start, end] of rows) {
       // Builtins and externals have no file.
@@ -408,11 +522,71 @@ export class CodeGraph {
 
   /** Edges of one kind, the target limited to repository code. */
   private async edges(kind: 'CALLS' | 'CALL_REFERENCE'): Promise<[string, string][]> {
-    const rows = await this.query(
-      `MATCH (a)-[:${kind}]->(b) RETURN a.qualified_name, b.qualified_name, b.file_path`
-    );
+    const rows = await this.query({
+      match: `(a)-[:${kind}]->(b)`,
+      returns: 'a.qualified_name, b.qualified_name, b.file_path',
+      file: 'a.file_path',
+    });
     return rows
       .filter(([, , path]) => typeof path === 'string' && path && !path.startsWith('<'))
       .map(([a, b]) => [this.short(a), this.short(b)]);
   }
+}
+
+/** A query the graph reads a set of files at a time (CodeGraph.query). */
+interface GraphQuery {
+  /** The pattern, e.g. `(a)-[:CALLS]->(b)`. */
+  match: string;
+  /** What every row meets, if anything, e.g. `f.label IN ['Function', 'Method']`. */
+  where?: string;
+  /** The columns of a row. */
+  returns: string;
+  /**
+   * The file a row belongs to, one per row, on the pattern's first node so the engine filters on
+   * it before it follows edges: `f.file_path`, or `a.file_path` for an edge's caller.
+   */
+  file: string;
+}
+
+/** Some of a query's files and the rows they hold; no files is every file. */
+interface GraphPiece {
+  files?: string[];
+  rows: number;
+}
+
+/**
+ * The files packed, in order, into sets of at most PIECE_FILES names and PIECE_BYTES bytes of
+ * them as the query names them.
+ */
+function fileSets(files: string[]): string[][] {
+  const sets: string[][] = [];
+  let bytes = 0;
+  for (const file of files) {
+    const size = Buffer.byteLength(cypherString(file)) + 2;
+    const last = sets.at(-1);
+    if (last && last.length < PIECE_FILES && bytes + size <= PIECE_BYTES) {
+      last.push(file);
+      bytes += size;
+    } else {
+      sets.push([file]);
+      bytes = size;
+    }
+  }
+  return sets;
+}
+
+/** The query limited to some files, when given them: its own condition and the files, both. */
+function pieceCypher(query: GraphQuery, files?: string[]): string {
+  const among = files && `${query.file} IN [${files.map(cypherString).join(', ')}]`;
+  return cypher(query, [query.where, among].filter(Boolean).join(' AND ') || undefined);
+}
+
+/** `MATCH <pattern> [WHERE <where>] RETURN <columns>`. */
+function cypher(query: Pick<GraphQuery, 'match' | 'returns'>, where: string | undefined): string {
+  return `MATCH ${query.match}${where ? ` WHERE ${where}` : ''} RETURN ${query.returns}`;
+}
+
+/** A Cypher string literal: the tool's lexer reads a backslash as escaping the next character. */
+function cypherString(text: string): string {
+  return `'${text.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }

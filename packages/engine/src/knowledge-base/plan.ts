@@ -705,20 +705,34 @@ export function packetSpec(packets: Packet[], review: Map<string, Set<string>>):
 // The plan
 // --------------------------------------------------------------------------- //
 
-/** Steps 1-7 for one repository; `maintained` is the repository's own threat model, if any. */
-export async function planScan(
+/** Every label of a whole repository: what the architecture review and the packet design read. */
+export interface RepositoryLabels {
+  functionLabels: Map<string, Answers>;
+  fileLabels: Map<string, Answers>;
+  /** The file sweep's answers: every text file's architecture role and secret. */
+  roles: Map<string, Answers>;
+  entries: Entry[];
+  sinks: Map<string, string>;
+  /** Files with at least one entry point, and how many. */
+  entryFiles: Map<string, number>;
+}
+
+/**
+ * Steps 1-3's labels of every function and file: a full scan's, and a diff's that has no stored
+ * threat model and reviews the whole repository itself (diff.ts buildThreatModel).
+ *
+ * Jev's answers are cached by exactly what a request sends (cache.ts), so both ask through this
+ * one function: a diff that sends a full scan's requests is answered from the full scan's cache
+ * for every file the change left alone.
+ */
+export async function labelRepository(
   client: CynosDecisions,
-  cynos: ReviewModel,
   repo: Repository,
-  log: (message: string) => void,
-  maintained?: { path: string; text: string },
-  agent?: AgentPlan,
-  maxPackets = MAX_PACKETS
-): Promise<Plan> {
+  log: (message: string) => void
+): Promise<RepositoryLabels> {
   const fileItems = repo.product.map(
     r => [r.path, { path: r.path, content: r.text }] as [string, unknown]
   );
-  const progress = (step: string): void => log(`${step} ($${client.cost.toFixed(4)} so far)`);
 
   // 1. Per-function labels; entry points are trusted only when most were answered. Then the
   // hypothesis templates' follow-up questions, each of the functions whose answers make it matter.
@@ -740,12 +754,12 @@ export async function planScan(
   const { answers: fileLabels } = await askMany(client, fileItems, FILE_QUESTIONS, log);
   const entries = entryPoints(repo, functionLabels, fileLabels);
   const sinks = sinkFunctions(functionLabels);
-  progress(`${entries.length} entry points, ${sinks.size} sink functions`);
+  log(
+    `${entries.length} entry points, ${sinks.size} sink functions ($${client.cost.toFixed(4)} so far)`
+  );
 
-  // 3. The file sweep: every text file's architecture role and whether it holds a secret. Then the
-  // baseline from the attack-path answers and the secret windows, with the architecture review
-  // alongside, since both read only the labels and the sweep.
-  const { answers: sweep } = await askMany(
+  // 3. The file sweep: every text file's architecture role and whether it holds a secret.
+  const { answers: roles } = await askMany(
     client,
     repo.rows
       .filter(r => r.text !== undefined)
@@ -753,11 +767,40 @@ export async function planScan(
     FILE_SWEEP_QUESTIONS,
     log
   );
+  const entryFiles = new Map<string, number>();
+  for (const e of entries) entryFiles.set(e.path, (entryFiles.get(e.path) ?? 0) + 1);
+  return { functionLabels, fileLabels, roles, entries, sinks, entryFiles };
+}
+
+/** Steps 1-7 for one repository; `maintained` is the repository's own threat model, if any. */
+export async function planScan(
+  client: CynosDecisions,
+  cynos: ReviewModel,
+  repo: Repository,
+  log: (message: string) => void,
+  maintained?: { path: string; text: string },
+  agent?: AgentPlan,
+  maxPackets = MAX_PACKETS
+): Promise<Plan> {
+  const fileItems = repo.product.map(
+    r => [r.path, { path: r.path, content: r.text }] as [string, unknown]
+  );
+  const progress = (step: string): void => log(`${step} ($${client.cost.toFixed(4)} so far)`);
+
+  // 1-3. Every function's and file's labels, and the file sweep (labelRepository). Then the
+  // baseline from the attack-path answers and the secret windows, with the architecture review
+  // alongside, since both read only the labels and the sweep.
+  const {
+    functionLabels,
+    fileLabels,
+    roles: sweep,
+    entries,
+    sinks,
+    entryFiles,
+  } = await labelRepository(client, repo, log);
   const baseline = [...repo.tokens.keys()]
     .sort()
     .filter(p => !fileLabels.has(p) || noul(fileLabels.get(p), 'attack_path') >= ATTACK_PATH_P);
-  const entryFiles = new Map<string, number>();
-  for (const e of entries) entryFiles.set(e.path, (entryFiles.get(e.path) ?? 0) + 1);
   const [windows, review] = await Promise.all([
     secretWindows(client, repo.rows, new Set(), sweep, log),
     reviewArchitecture(

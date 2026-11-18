@@ -214,10 +214,17 @@ export function knowledgeBaseSummary(terminal: Terminal, runDir: string): string
   if (built?.['kind'] === 'diff') {
     const n = (key: string): string => Number(built[key] ?? 0).toLocaleString('en-US');
     const briefs = Array.isArray(built['briefs']) ? built['briefs'].length : 0;
-    const tm = (built['threat_model'] ?? {}) as { gate?: string[]; updated?: boolean };
-    const model = tm.updated
-      ? `updated for the change (${(tm.gate ?? []).length} reasons)`
-      : "the last full scan's, unchanged";
+    const tm = (built['threat_model'] ?? {}) as {
+      from?: { source?: string };
+      gate?: string[];
+      updated?: boolean;
+    };
+    const model =
+      tm.from?.source === 'built'
+        ? 'built for this diff: no full scan stored one'
+        : tm.updated
+          ? `updated for the change (${(tm.gate ?? []).length} reasons)`
+          : "the last full scan's, unchanged";
     lines.push(
       `  ${n('changed_files')} changed files · ${n('changed_functions')} changed functions · ${n('path_functions')} on their paths`,
       `  ${briefs} helper briefs · ${n('jev_calls')} Jev calls ($${Number(built['cost_usd'] ?? 0).toFixed(2)})`,

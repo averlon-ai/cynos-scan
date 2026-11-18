@@ -6,7 +6,8 @@
  * upstream and Codex's sandbox launcher are only tested under Node. Windows is refused because
  * no scan can start there: the native runtime's sandbox check runs /usr/bin/true, the knowledge
  * base's code graph has no Windows build, and Docker Desktop refuses the docker runtime's seccomp
- * profile. WSL 2 is Linux, and runs it.
+ * profile. WSL 2 is Linux, and runs it. install-smoke.yml checks both: the refusal on Windows, and
+ * a scan in Ubuntu on WSL 2.
  */
 
 export const SUPPORTED_NODE = '^22.13 || ^24 || ^26';

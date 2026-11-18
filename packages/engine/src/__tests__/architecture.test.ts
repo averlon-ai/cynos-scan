@@ -440,6 +440,50 @@ describe('the agent index and reader', () => {
     expect(spawned).toEqual([plan.name]);
   });
 
+  it('asks a session that answered with invalid JSON for the review once more', async () => {
+    // A final message with a quote left unescaped inside a string, as a model wrote one.
+    const answers = [
+      '```json\n{"threatModel":{"summary":["the "admin" role decides access"]}}\n```',
+      '{"threatModel":{"summary":["the \\"admin\\" role decides access"]}}',
+    ];
+    const work = mkdtempSync(join(tmpdir(), 'agent-invalid-json-'));
+    const sessions: { resume: boolean; prompt: string }[] = [];
+    let resume = false;
+    const runtime = {
+      reviewAgentCommand: (agent: AgentPlan, again: boolean) => {
+        resume = again;
+        return { name: agent.name, argv: ['true'] };
+      },
+      spawn: () => {
+        const child = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+          stdin: {
+            end: (prompt: string) => {
+              writeFileSync(join(work, 'answer.txt'), answers[Math.min(sessions.length, 1)]!);
+              sessions.push({ resume, prompt });
+              queueMicrotask(() => child.emit('close', 0));
+            },
+          },
+        });
+        return child as unknown as ChildProcess;
+      },
+      stop: async () => {},
+    } as unknown as ScanRuntime;
+    const plan: AgentPlan = {
+      name: 'cs-run-knowledge-base-review',
+      project: '/project',
+      work,
+      cynosKey: 'k',
+      runtime,
+      paths: { project: '/scan/project', review: '/scan/review' },
+    };
+    const { review } = await agentReview(plan, input, () => []);
+    expect(review?.threatModel.summary).toBe('the "admin" role decides access');
+    expect(sessions[1]?.resume).toBe(true);
+    expect(sessions[1]?.prompt).toContain('its JSON object does not parse');
+  });
+
   it('labels every file and function in the index', () => {
     const { files, functions } = indexFiles(input);
     expect(files).toContain('src/app.ts\tcode\t30\trole:startup,entry:1');

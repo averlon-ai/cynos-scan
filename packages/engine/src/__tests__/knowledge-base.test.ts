@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import { statSync } from 'node:fs';
 import { C_PROJECT, KNOWLEDGE_BASE_INDEX, KNOWLEDGE_BASE_OUTPUT } from '../constants';
 import { buildKnowledgeBase, type BuildPlan } from '../knowledge-base';
+import { removedCode } from '../knowledge-base/diff';
 import {
   decisionFor,
   fakeFetch,
+  fakeGraphTool,
   fakeServer,
   gitCheckout,
   pick,
@@ -98,6 +100,16 @@ describe('jev', () => {
     for (const part of parts) expect(part.length).toBeLessThanOrEqual(MAX_STATE_CHARS);
   });
 
+  it('cuts a line longer than one call within the line, leaving none of it out', () => {
+    // A minified script: one 150 KB line between ordinary ones. Its text past the first call's
+    // worth must reach a chunk too.
+    const text = `start\n${'x'.repeat(MAX_STATE_CHARS)}${'y'.repeat(60_000)}\nend\n`;
+    const parts = chunks(text);
+    expect(parts.join('')).toBe(text);
+    expect(parts.some(part => part.includes('y'))).toBe(true);
+    for (const part of parts) expect(part.length).toBeLessThanOrEqual(MAX_STATE_CHARS);
+  });
+
   it('merges chunked answers: a fact holds if any chunk shows it', () => {
     const merged = mergeAnswers([
       { secret: yes(0.1), sink: pick('none', { none: 0.9, database: 0.1 }) },
@@ -144,6 +156,34 @@ describe('jev', () => {
     expect(calls).toBe(2);
     expect(noul(answers.get('config.py'), 'embedded_secret')).toBe(0.99);
     expect(choice(answers.get('config.py'), 'architecture_role')).toBe('configuration');
+  });
+
+  it('asks the lines a hunk removed in chunks when they are larger than one call', async () => {
+    // A regenerated document whose one hunk removed 256 KB: cynos refuses a decision past 256 KiB.
+    const removed = `${'x'.repeat(99)}\n`.repeat(2600);
+    const items = removedCode([
+      {
+        path: 'docs/api.md',
+        status: 'modified',
+        patch: '',
+        binary: false,
+        hunks: [
+          { oldStart: 1, oldLines: 2600, newStart: 1, newLines: 0, changedLines: [1], removed },
+        ],
+      },
+    ]).map(([key, state]) => [key, state] as [string, unknown]);
+    const bodies: Record<string, unknown>[] = [];
+    const client = new CynosDecisions(
+      'k',
+      5,
+      fakeFetch((_, body) => decisionFor(body, () => yes(0.9)), bodies),
+      async () => {}
+    );
+    const { answers, failed } = await askMany(client, items, { entry_point: asked() });
+    expect(failed).toBe(0);
+    expect(noul(answers.get('docs/api.md#0'), 'entry_point')).toBe(0.9);
+    expect(bodies.length).toBe(3);
+    for (const body of bodies) expect(JSON.stringify(body).length).toBeLessThan(256 * 1024);
   });
 });
 
@@ -511,20 +551,19 @@ describe('code graph', () => {
     const commands: string[][] = [];
     const servers: string[][] = [];
     let failures = 1;
+    const graph = fakeGraphTool({
+      index: { project: 'scan-x' },
+      functions: [
+        { qn: 'scan-x.app.a', name: 'a', path: 'app.py', start: 1, end: 5 },
+        { qn: 'len', name: 'len', path: '<builtin>', start: 0, end: 0 },
+        { qn: 'scan-x.app.b', name: 'b', path: 'app.py', start: 9, end: 12 },
+      ],
+      pageRows: 2,
+    });
     const connect = fakeServer((tool, args) => {
       inputs.push(args);
-      if (tool === 'index_repository') return { project: 'scan-x' };
-      if (failures-- > 0) return new Error('daemon starting');
-      return args['cursor']
-        ? { rows: [['scan-x.app.b', 'b', 'app.py', 9, 12]], has_more: false }
-        : {
-            rows: [
-              ['scan-x.app.a', 'a', 'app.py', 1, 5],
-              ['len', 'len', '<builtin>', 0, 0],
-            ],
-            has_more: true,
-            next_cursor: 'c1',
-          };
+      if (tool !== 'index_repository' && failures-- > 0) return new Error('daemon starting');
+      return graph(tool, args);
     }, servers);
     const codeGraph = new CodeGraph(
       graphPlan(),
@@ -537,27 +576,31 @@ describe('code graph', () => {
     await codeGraph.stop();
     expect(functions.map(f => f.qn)).toEqual(['app.a', 'app.b']);
     expect(inputs.slice(1).every(i => i['project'] === 'scan-x')).toBe(true);
-    expect(inputs.at(-1)?.['cursor']).toBe('c1');
-    // One container, one server for all four calls, and the container removed at the end.
+    // The count, then the functions' first page and, by its cursor, their second.
+    expect(inputs.at(-2)?.['cursor']).toBeUndefined();
+    expect(inputs.at(-1)?.['cursor']).toBe('2');
+    // One container, one server for every call, and the container removed at the end.
     expect(servers).toEqual([['docker', 'exec', '-i', plan.name, 'codebase-memory-mcp']]);
     expect(commands.map(c => c[0])).toEqual(['run', 'rm']);
   });
 
   it('reads call references: a function passed as a value, as the wiring that hands it over', async () => {
     const queries: string[] = [];
-    const connect = fakeServer((tool, args) => {
-      if (tool === 'index_repository') return { project: 'scan' };
-      queries.push(String(args['query']));
-      return {
-        rows: [
-          [
-            'scan.server.loadBuiltinPlugin',
-            'scan.server.newInternalShadowContext',
-            'server/slm.go',
-          ],
-          ['scan.server.loadBuiltinPlugin', 'fmt.Sprintf', '<external>'],
-        ],
-      };
+    const wiring = (callee: string, calleePath: string) => ({
+      caller: 'scan.server.loadBuiltinPlugin',
+      callerPath: 'server/plugins.go',
+      callee,
+      calleePath,
+    });
+    const tool = fakeGraphTool({
+      callReferences: [
+        wiring('scan.server.newInternalShadowContext', 'server/slm.go'),
+        wiring('fmt.Sprintf', '<external>'),
+      ],
+    });
+    const connect = fakeServer((name, args) => {
+      if (name === 'query_graph') queries.push(String(args['query']));
+      return tool(name, args);
     });
     const codeGraph = new CodeGraph(graphPlan(), { run: recordingRunner([]), connect });
     await codeGraph.start();
@@ -566,9 +609,124 @@ describe('code graph', () => {
       ['server.loadBuiltinPlugin', 'server.newInternalShadowContext'],
     ]);
     await codeGraph.stop();
+    // A result that fits under the tool's cap is read whole, after its count.
     expect(queries).toEqual([
+      'MATCH (a)-[:CALL_REFERENCE]->(b) RETURN count(*)',
       'MATCH (a)-[:CALL_REFERENCE]->(b) RETURN a.qualified_name, b.qualified_name, b.file_path',
     ]);
+  });
+
+  it("reads a result over the tool's 100k-row cap a set of files at a time, every row exactly once", async () => {
+    // 120,000 calls from 3,000 files: more rows than the tool returns for one query, however it is
+    // paged, and more files than one request names. One file is named with a quote and a
+    // backslash, and some by paths longer than the 511 bytes the tool keeps of a grouped value.
+    const files = Array.from({ length: 3_000 }, (_, i) =>
+      i === 7 ? "it's\\odd.py" : i % 100 === 0 ? `${'deep/'.repeat(120)}m${i}.py` : `m${i}.py`
+    );
+    const calls = Array.from({ length: 120_000 }, (_, i) => ({
+      caller: `scan.f${i}`,
+      callerPath: files[i % files.length] ?? '',
+      callee: `scan.g${i}`,
+      calleePath: 'lib.py',
+    }));
+    const queries: string[] = [];
+    const tool = fakeGraphTool({ calls });
+    const connect = fakeServer((name, args) => {
+      if (name === 'query_graph') queries.push(String(args['query']));
+      return tool(name, args);
+    });
+    const codeGraph = new CodeGraph(
+      graphPlan(),
+      { run: recordingRunner([]), connect },
+      async () => {}
+    );
+    await codeGraph.start();
+    await codeGraph.index();
+    const read = await codeGraph.calls();
+    await codeGraph.stop();
+    expect(read).toHaveLength(calls.length);
+    expect(new Set(read.map(([caller]) => caller)).size).toBe(calls.length);
+    // The count, then the graph's files, then each set of them counted and read; no count is
+    // grouped by file.
+    expect(queries.slice(0, 3)).toEqual([
+      'MATCH (a)-[:CALLS]->(b) RETURN count(*)',
+      'MATCH (f:File) RETURN count(*)',
+      'MATCH (f:File) RETURN f.file_path',
+    ]);
+    expect(queries.some(q => q.includes('file_path, count(*)'))).toBe(false);
+    // Every request names at most 2,000 files, in at most 256 KiB of names.
+    const pieces = queries.slice(3);
+    expect(pieces.every(q => q.includes(' WHERE a.file_path IN ['))).toBe(true);
+    expect(Math.max(...pieces.map(q => q.split("', '").length))).toBeLessThanOrEqual(2_000);
+    expect(Math.max(...pieces.map(q => Buffer.byteLength(q)))).toBeLessThan(256 * 1024 + 100);
+  });
+
+  it("reads a result under the tool's cap whole, however large", async () => {
+    const calls = Array.from({ length: 99_999 }, (_, i) => ({
+      caller: `scan.f${i}`,
+      callerPath: `m${i % 400}.py`,
+      callee: `scan.g${i}`,
+      calleePath: 'lib.py',
+    }));
+    const queries: string[] = [];
+    const tool = fakeGraphTool({ calls });
+    const connect = fakeServer((name, args) => {
+      if (name === 'query_graph') queries.push(String(args['query']));
+      return tool(name, args);
+    });
+    const codeGraph = new CodeGraph(graphPlan(), { run: recordingRunner([]), connect });
+    await codeGraph.start();
+    expect(await codeGraph.calls()).toHaveLength(calls.length);
+    await codeGraph.stop();
+    // Its count, then the query unfiltered, page after page.
+    expect([...new Set(queries)]).toEqual([
+      'MATCH (a)-[:CALLS]->(b) RETURN count(*)',
+      'MATCH (a)-[:CALLS]->(b) RETURN a.qualified_name, b.qualified_name, b.file_path',
+    ]);
+  });
+
+  it('fails, rather than read part of the graph, when the reads are not what was counted or one file reaches the cap', async () => {
+    const calls = (count: number, path: (i: number) => string) =>
+      Array.from({ length: count }, (_, i) => ({
+        caller: `scan.f${i}`,
+        callerPath: path(i),
+        callee: `scan.g${i}`,
+        calleePath: 'lib.py',
+      }));
+    const readCalls = async (answer: (tool: string, args: Record<string, unknown>) => unknown) => {
+      const codeGraph = new CodeGraph(
+        graphPlan(),
+        { run: recordingRunner([]), connect: fakeServer(answer) },
+        async () => {}
+      );
+      await codeGraph.start();
+      return codeGraph.calls();
+    };
+    const spread = calls(120_000, i => `m${i % 4}.py`);
+    // A piece the tool answers one row short.
+    const tool = fakeGraphTool({ calls: spread });
+    await expect(
+      readCalls((name, args) => {
+        const out = tool(name, args) as { rows?: unknown[][] };
+        const query = String(args['query']);
+        return query.includes(' IN [') && !query.endsWith('count(*)')
+          ? { ...out, rows: out.rows?.slice(1) }
+          : out;
+      })
+    ).rejects.toThrow('the code graph cannot be read completely');
+    // Calls from a file the graph has no File node for.
+    await expect(
+      readCalls(fakeGraphTool({ calls: spread, files: ['m0.py', 'm1.py', 'm2.py'] }))
+    ).rejects.toThrow('and 90000 of them on the graph');
+    // One file holding 100,000 calls on its own.
+    await expect(
+      readCalls(fakeGraphTool({ calls: calls(100_000, () => 'huge.py') }))
+    ).rejects.toThrow('codebase-memory-mcp cannot read huge.py: it holds 100000 rows');
+    // A graph of 100,000 files, too many to list.
+    const many = Array.from({ length: 100_000 }, (_, i) => `m${i}.py`);
+    await expect(
+      readCalls(fakeGraphTool({ calls: calls(100_000, i => many[i] ?? ''), files: many }))
+    ).rejects.toThrow("cannot list the code graph's 100000 files");
   });
 
   it('takes a write the server no longer reads as its exit, on Node, not as an error that ends it', async () => {
@@ -938,17 +1096,21 @@ describe('buildKnowledgeBase', () => {
     const transport = {
       run: recordingRunner(commands),
       connect: fakeServer(
-        (tool, args) =>
-          tool === 'index_repository'
-            ? { project: 'scan', nodes: 9, edges: 4 }
-            : String(args['query']).includes('CALLS')
-              ? { rows: [['scan.app.routes.login', 'scan.app.db.find', 'app/db.py']] }
-              : {
-                  rows: [
-                    ['scan.app.routes.login', 'login', 'app/routes.py', 3, 4],
-                    ['scan.app.db.find', 'find', 'app/db.py', 1, 2],
-                  ],
-                },
+        fakeGraphTool({
+          index: { project: 'scan', nodes: 9, edges: 4 },
+          functions: [
+            { qn: 'scan.app.routes.login', name: 'login', path: 'app/routes.py', start: 3, end: 4 },
+            { qn: 'scan.app.db.find', name: 'find', path: 'app/db.py', start: 1, end: 2 },
+          ],
+          calls: [
+            {
+              caller: 'scan.app.routes.login',
+              callerPath: 'app/routes.py',
+              callee: 'scan.app.db.find',
+              calleePath: 'app/db.py',
+            },
+          ],
+        }),
         commands
       ),
     };

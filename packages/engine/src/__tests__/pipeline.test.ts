@@ -30,6 +30,8 @@ import type { ScanEvent } from '../progress';
 import type { RuntimeCommand } from '../runtime';
 import { scanReachesScanning } from '../sandbox';
 import { DockerRuntime as Docker } from '../runtime/docker';
+import type { KnowledgeBaseStore } from '../knowledge-base/store';
+import { gitCheckout, gitCommit, gitHead } from './knowledge-base-fakes';
 
 const ASSETS = resolve(import.meta.dir, '../../assets');
 /** The harness sees its output mount at /srv/out; the Docker host has it at /data/arm/out. */
@@ -269,12 +271,13 @@ describe('scanCheckout', () => {
     expect(scanOptions(off, { ...knowledge, summary: {} as never }, true).plugin).toBe(true);
   });
 
-  it("builds a diff's knowledge base too, and fails the run without a full scan's threat model", async () => {
+  it("builds a diff's knowledge base too, and fails the run when the build fails", async () => {
     const diff = { ...config, kind: 'diff' as const, diffBase: 'a'.repeat(40), cynosKey: 'k' };
     expect(requireKeys(diff)).toMatchObject({ callsModel: true, buildsBase: true });
     const warnings: string[] = [];
     const runtime = new Docker({ assets: ASSETS });
-    // No store, so no stored review: the build fails before it reads the checkout.
+    // No store, so no stored review: the build would review the whole repository, and fails on a
+    // stage it cannot write.
     await expect(
       knowledgePhase(
         diff,
@@ -283,10 +286,45 @@ describe('scanCheckout', () => {
         requireKeys(diff),
         { ...io, warn: m => warnings.push(m) }
       )
-    ).rejects.toThrow(
-      "The knowledge base could not be built, so no scan was started: no full scan's threat model is stored for this repository"
-    );
+    ).rejects.toThrow('The knowledge base could not be built, so no scan was started: ');
     expect(warnings).toEqual([]);
+  });
+
+  it("prefers a diff base's snapshot only when the base is in HEAD's history", async () => {
+    // main at m1, the branch's base; the branch at head; main moved on to m2, outside its history.
+    const project = gitCheckout({ 'a.py': 'a = 1\n' });
+    const m1 = gitHead(project);
+    const head = gitCommit(project, { 'a.py': 'a = 2\n' });
+    const runtime = new Docker({ assets: ASSETS });
+    const preferredFor = async (diffBase: string): Promise<string[]> => {
+      const preferred: string[][] = [];
+      const store: KnowledgeBaseStore = {
+        restore: async (_dir, _sha, wanted) => {
+          preferred.push(wanted);
+          return undefined;
+        },
+        save: async () => {},
+      };
+      const diff = {
+        ...config,
+        kind: 'diff' as const,
+        project,
+        scannedSha: head,
+        diffBase,
+        cynosKey: 'k',
+      };
+      // The build then fails on the stage it cannot write; only the restore is checked.
+      await knowledgePhase(
+        diff,
+        runtime.layout(diff.stage, diff.project, 'scan'),
+        runtime,
+        requireKeys(diff),
+        { ...io, knowledgeBaseStore: store }
+      ).catch(() => {});
+      return preferred.flat();
+    };
+    expect(await preferredFor(m1)).toEqual([m1]);
+    expect(await preferredFor('f'.repeat(40))).toEqual([]);
   });
 
   it('refuses a number of hypothesis packets that is not whole before anything starts', async () => {

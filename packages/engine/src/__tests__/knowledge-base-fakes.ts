@@ -109,6 +109,102 @@ export function fakeServer(
   };
 }
 
+/** A function as the graph stores it: its qualified name carries the project, e.g. `scan.app.a`. */
+export interface FakeFunction {
+  qn: string;
+  name: string;
+  path: string;
+  start: number;
+  end: number;
+}
+
+/** An edge as the graph stores it: the caller's file is the one the graph reads it by. */
+export interface FakeEdge {
+  caller: string;
+  callerPath: string;
+  callee: string;
+  calleePath: string;
+}
+
+/** A code graph for fakeGraphTool to answer from. */
+export interface FakeGraph {
+  /** What index_repository answers; its `project` is the name later queries must use. */
+  index?: Record<string, unknown>;
+  functions?: FakeFunction[];
+  calls?: FakeEdge[];
+  callReferences?: FakeEdge[];
+  /** The File nodes' paths; by default every file a function or an edge names. */
+  files?: string[];
+  /** Rows per response page (the real tool's are bounded by output tokens); all by default. */
+  pageRows?: number;
+}
+
+/**
+ * codebase-memory-mcp's query_graph over a fake graph, for fakeServer, with the real tool's limits:
+ * a query whose whole result reaches 100k rows is refused however it is paged, and the rows that
+ * fit come back in pages joined by a cursor. It reads the queries CodeGraph writes (functions by
+ * label, edges by kind, File nodes, `<file> IN [...]`, a `count(*)`) and fails on any other.
+ */
+export function fakeGraphTool(
+  graph: FakeGraph
+): (tool: string, args: Record<string, unknown>) => unknown {
+  const project = String(graph.index?.['project'] ?? 'scan');
+  const fileNodes =
+    graph.files ??
+    [
+      ...new Set([
+        ...(graph.functions ?? []).map(f => f.path),
+        ...[...(graph.calls ?? []), ...(graph.callReferences ?? [])].flatMap(e => [
+          e.callerPath,
+          e.calleePath,
+        ]),
+      ]),
+    ].filter(path => !path.startsWith('<'));
+  return (tool, args) => {
+    if (tool === 'index_repository') return { project, ...graph.index };
+    if (tool !== 'query_graph' || args['project'] !== project)
+      return new Error(`unexpected call: ${tool} ${JSON.stringify(args)}`);
+    const query = String(args['query']);
+    // The rows the pattern matches, each with the file it belongs to.
+    const kind = /^MATCH \(a\)-\[:(CALLS|CALL_REFERENCE)\]->\(b\)/.exec(query)?.[1];
+    const functions = /^MATCH \(f\) WHERE f\.label IN \['Function', 'Method'\]/.test(query);
+    const files = /^MATCH \(f:File\)/.test(query);
+    if (!kind && !functions && !files) return new Error(`unexpected query: ${query}`);
+    const matched = kind
+      ? (kind === 'CALLS' ? graph.calls : graph.callReferences)?.map(e => ({
+          file: e.callerPath,
+          row: [e.caller, e.callee, e.calleePath],
+        }))
+      : functions
+        ? graph.functions?.map(f => ({ file: f.path, row: [f.qn, f.name, f.path, f.start, f.end] }))
+        : fileNodes.map(path => ({ file: path, row: [path] }));
+    // The files the query is limited to, its string literals unescaped as the tool's lexer does.
+    const list = /\.file_path IN \[(.*)\] RETURN/.exec(query)?.[1];
+    const among =
+      list === undefined
+        ? undefined
+        : new Set(
+            [...list.matchAll(/'((?:\\.|[^'\\])*)'/g)].map(m => m[1]!.replace(/\\(.)/g, '$1'))
+          );
+    const selected = (matched ?? []).filter(({ file }) => !among || among.has(file));
+    // A count is one row, as a string the way the real tool's json answers it, or none for no rows.
+    const result = / RETURN count\(\*\)$/.test(query)
+      ? selected.length
+        ? [[String(selected.length)]]
+        : []
+      : selected.map(({ row }) => row);
+    if (result.length >= 100_000)
+      return new Error('result exceeded 100k rows — use narrower filters or add LIMIT');
+    const offset = Number(args['cursor'] ?? 0);
+    const end = offset + Math.min(Number(args['max_rows']), graph.pageRows ?? Infinity);
+    return {
+      rows: result.slice(offset, end),
+      has_more: end < result.length,
+      ...(end < result.length ? { next_cursor: String(end) } : {}),
+    };
+  };
+}
+
 /** A runner for the graph container's start and stop that only records them. */
 export const recordingRunner =
   (commands: string[][]): ProcessRunner =>
