@@ -16,7 +16,9 @@
  *                    answered from the cache (cache.ts), so a diff asks about little
  *   5  threat model  the last full scan's review (stored-review.ts), updated by the review agent
  *                    when the change touches what the review describes (reviewGate), else reused.
- *                    A diff starts from it: with none stored the build fails before step 1
+ *                    With none stored, or one of a commit outside this checkout's history, the
+ *                    build reviews the whole repository at HEAD itself (buildThreatModel) and
+ *                    stores that review, so the next diff of this branch starts from it
  *   6  packets       one design call whose instructions are upstream's own rules for grouping a
  *                    scan into packets and for how far a diff follows supporting code
  *   7  briefs        the lead's index, a brief per packet, the reader (diff-briefing.ts)
@@ -31,6 +33,7 @@ import { runCommand, type Runner } from '../processes';
 import type { AgentPlan } from './architecture-agent';
 import {
   citedPaths,
+  maintainedThreatModel,
   renderReview,
   reviewArchitecture,
   roleOf,
@@ -53,13 +56,20 @@ import {
   FILE_SWEEP_QUESTIONS,
   FUNCTION_QUESTIONS,
   functionStates,
+  labelRepository,
   secretWindows,
   sinkFunctions,
   tokens,
   type Entry,
   type SecretWindow,
 } from './plan';
-import { loadReview, reuseReview, type ReuseStats, type StoredReview } from './stored-review';
+import {
+  loadReview,
+  reuseReview,
+  saveReview,
+  type ReuseStats,
+  type StoredReview,
+} from './stored-review';
 
 /** Where Jev's answers are kept in the cache; the full build's file, so its answers are reused. */
 const ANSWERS_FILE = 'jev-answers.jsonl';
@@ -858,7 +868,7 @@ export interface DiffKnowledgeBaseSummary {
   /** Functions the paths through the change brought in. */
   path_functions: number;
   graph: { functions: number; calls: number; call_references: number };
-  /** The stored threat model and what the update did. */
+  /** Where the threat model came from (stored, or built), and what the update did. */
   threat_model: {
     from: ReuseStats;
     /** Why it was updated; empty when the change left it as it was. */
@@ -1066,7 +1076,7 @@ async function labelChange(
 
 /**
  * Builds a diff's knowledge base into `<work>/output` and `<work>/kb`, in the order the module
- * comment lists; throws when a step fails, and first when no full scan's threat model is stored.
+ * comment lists; throws when a step fails.
  */
 export async function buildDiffKnowledgeBase(
   plan: DiffBuildPlan,
@@ -1075,9 +1085,9 @@ export async function buildDiffKnowledgeBase(
   transport: GraphTransport = graphTransport,
   run: Runner = runCommand
 ): Promise<DiffKnowledgeBaseSummary> {
-  // 0. The last full scan's review, which step 5 brings up to date: checked first, so a diff with
-  // nothing to start from fails before it writes or spends anything.
-  const stored = storedReview(plan, run);
+  // 0. The last full scan's review, which step 5 brings up to date; with none usable, step 5
+  // builds one.
+  const stored = storedReview(plan, log, run);
   const client = models.decisions;
   const stop = (): void => {
     if (plan.signal?.aborted)
@@ -1146,7 +1156,7 @@ export async function buildDiffKnowledgeBase(
 
   // 5. The threat model: the stored review, updated by the review agent when the gate opens. A
   // review older than the diff's base is read against the change since its own commit, computed
-  // as the diff's is.
+  // as the diff's is. With no stored review, the whole repository is reviewed at HEAD instead.
   stop();
   const sameCommit = (a: string, b: string): boolean => {
     const resolve = (rev: string) =>
@@ -1160,12 +1170,16 @@ export async function buildDiffKnowledgeBase(
     );
     return viewOf(sha, gitChanges(plan.project, sha, run));
   };
-  const threatModel = await updateThreatModel(plan, stored, rows, functions, since, models, log);
+  const threatModel = stored
+    ? await updateThreatModel(plan, stored, rows, functions, since, models, log)
+    : await buildThreatModel(plan, rows, functions, calls, models, log);
   plan.step?.(
     'threat-model',
-    threatModel.updated
-      ? `threat model updated: ${threatModel.gate.length} reasons`
-      : 'threat model reused: the change leaves it as it was',
+    threatModel.from.source === 'built'
+      ? "threat model built: no full scan's threat model was stored"
+      : threatModel.updated
+        ? `threat model updated: ${threatModel.gate.length} reasons`
+        : 'threat model reused: the change leaves it as it was',
     {}
   );
 
@@ -1220,11 +1234,6 @@ export async function buildDiffKnowledgeBase(
     roles: labels.roles,
     entryFiles,
     review,
-    threatModel: {
-      from: threatModel.from.sha,
-      gate: threatModel.gate,
-      updated: threatModel.updated,
-    },
   });
   writeFileSync(join(output, 'code-graph.md'), kb.markdown);
   writeFileSync(join(output, 'threat-model.json'), `${JSON.stringify(review, null, 1)}\n`);
@@ -1257,23 +1266,120 @@ export async function buildDiffKnowledgeBase(
 }
 
 /**
- * Step 0: the last full scan's review, which the store restored into the cache. A diff needs it:
- * a review from scratch needs the whole repository labelled, which is a full scan's work, and
- * upstream's diff workflow building the threat model itself is the slow scan this knowledge base
- * replaces. So none stored, or one of a commit outside this checkout's history (another
- * repository's), fails the build.
+ * Step 0: the last full scan's review, which the store restored into the cache, or undefined when
+ * there is none to start from: none stored (no full scan yet, or its cache evicted), or one of a
+ * commit outside this checkout's history (the store's newest is another branch's, or another
+ * repository's), whose change since cannot be computed. Step 5 then builds one (buildThreatModel).
  */
-function storedReview(plan: DiffBuildPlan, run: Runner): StoredReview {
+function storedReview(
+  plan: DiffBuildPlan,
+  log: (message: string) => void,
+  run: Runner
+): StoredReview | undefined {
   const stored = plan.cacheDir ? loadReview(plan.cacheDir) : undefined;
-  if (!stored)
-    throw new Error(
-      "no full scan's threat model is stored for this repository: run a full scan first"
+  if (!stored) {
+    log("no full scan's threat model is stored: this diff builds one of the whole repository");
+    return undefined;
+  }
+  if (!inHistory(plan.project, stored.sha, run)) {
+    log(
+      `the stored threat model is of ${stored.sha.slice(0, 12)}, which is not in this checkout's history: this diff builds one of the whole repository`
     );
-  if (!inHistory(plan.project, stored.sha, run))
-    throw new Error(
-      `the stored threat model is of ${stored.sha.slice(0, 12)}, which is not in this checkout's history: run a full scan of this repository first`
-    );
+    return undefined;
+  }
   return stored;
+}
+
+/** What step 5 made: the threat model, where it came from, and what the update did. */
+interface ThreatModel {
+  review: ArchitectureReview;
+  from: ReuseStats;
+  /** Why the stored review was updated; empty when it was reused, or built. */
+  gate: string[];
+  updated: boolean;
+  stats: ReviewStats | null;
+}
+
+/** The review agent's plan, for both the update and a build: the scan's runtime and key. */
+function reviewAgent(plan: DiffBuildPlan): AgentPlan | undefined {
+  if (plan.reviewAgent === false) return undefined;
+  return {
+    name: `${plan.name}-review`,
+    project: plan.project,
+    runtime: plan.runtime,
+    paths: { project: plan.paths.project, review: plan.paths.review },
+    work: join(plan.work, 'review'),
+    cynosKey: plan.cynosKey,
+    ...(plan.modelCatalog ? { modelCatalog: plan.modelCatalog } : {}),
+    ...(plan.baseUrl ? { baseUrl: plan.baseUrl } : {}),
+    ...(plan.signal ? { signal: plan.signal } : {}),
+  };
+}
+
+/**
+ * Step 5 with no stored review: the whole repository reviewed at HEAD, as a full scan reviews it.
+ *
+ * The review reads every file's and function's labels, not only the change's, so the repository is
+ * labelled with a full scan's own requests (labelRepository): a cache restored from an older full
+ * scan answers every file the change left alone, and only changed content costs a call. The graph
+ * is step 2's, already indexed at HEAD. The review describes HEAD, the change included, so it needs
+ * no update. It is stored as HEAD's, so the next diff of this branch starts from it and updates it.
+ */
+async function buildThreatModel(
+  plan: DiffBuildPlan,
+  rows: FileRow[],
+  functions: FunctionNode[],
+  calls: [string, string][],
+  models: KnowledgeBaseModels,
+  log: (message: string) => void
+): Promise<ThreatModel> {
+  // Every product file's and function's labels, and the file sweep, as a full scan asks them.
+  const product = productRows(rows).filter(r => r.text);
+  const labels = await labelRepository(
+    models.decisions,
+    {
+      rows,
+      product,
+      functions,
+      calls,
+      tokens: new Map(product.map(r => [r.path, tokens(r.text ?? '')])),
+    },
+    log
+  );
+
+  // The review from scratch, with the repository's own threat model when it keeps one. A diff
+  // scan needs a threat model, so a failed review fails the build.
+  const maintained = maintainedThreatModel(rows, plan.threatModelPath);
+  const agent = reviewAgent(plan);
+  const built = await reviewArchitecture(
+    {
+      rows,
+      product,
+      functions,
+      fileLabels: labels.fileLabels,
+      functionLabels: labels.functionLabels,
+      roles: labels.roles,
+      entryFiles: labels.entryFiles,
+      ...(maintained ? { maintained } : {}),
+      ...(agent ? { agent } : {}),
+      cynos: models.chat,
+    },
+    log
+  );
+
+  // Stored as HEAD's, as a full build stores its own (index.ts).
+  if (plan.cacheDir && plan.head) saveReview(plan.cacheDir, plan.head, built.review);
+  const sha = plan.head ?? '';
+  log(
+    `threat model built for this diff${sha ? ` at ${sha.slice(0, 12)}` : ''}: ${built.stats.citations} citations`
+  );
+  return {
+    review: built.review,
+    from: { source: 'built', sha, citations: built.stats.citations, cut: 0, redacted: 0 },
+    gate: [],
+    updated: false,
+    stats: built.stats,
+  };
 }
 
 /**
@@ -1288,13 +1394,7 @@ async function updateThreatModel(
   since: (sha: string) => Promise<ChangeView>,
   models: KnowledgeBaseModels,
   log: (message: string) => void
-): Promise<{
-  review: ArchitectureReview;
-  from: ReuseStats;
-  gate: string[];
-  updated: boolean;
-  stats: ReviewStats | null;
-}> {
+): Promise<ThreatModel> {
   const { review, stats: from } = reuseReview(stored, rows);
   log(
     `threat model from the full scan of ${from.sha.slice(0, 12)}: ${from.citations} citations, ${from.cut} cut, ${from.redacted} secret literals redacted`
@@ -1313,20 +1413,7 @@ async function updateThreatModel(
   log(
     `threat model update: ${gate.slice(0, 5).join('; ')}${gate.length > 5 ? `; +${gate.length - 5} more` : ''}`
   );
-  const agent: AgentPlan | undefined =
-    plan.reviewAgent !== false
-      ? {
-          name: `${plan.name}-review`,
-          project: plan.project,
-          runtime: plan.runtime,
-          paths: { project: plan.paths.project, review: plan.paths.review },
-          work: join(plan.work, 'review'),
-          cynosKey: plan.cynosKey,
-          ...(plan.modelCatalog ? { modelCatalog: plan.modelCatalog } : {}),
-          ...(plan.baseUrl ? { baseUrl: plan.baseUrl } : {}),
-          ...(plan.signal ? { signal: plan.signal } : {}),
-        }
-      : undefined;
+  const agent = reviewAgent(plan);
   const updated = await reviewArchitecture(
     {
       rows,

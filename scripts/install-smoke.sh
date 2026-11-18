@@ -8,6 +8,9 @@
 # package's files list, its bin, upstream resolved beside the bundle, the Node versions in
 # engines. This installs into an empty global prefix, checks the version and the help, then runs
 # the end to end scan on each runtime given with the installed bin.
+#
+# On Windows (Git Bash) cynos refuses to start and points to WSL 2, so there it checks that
+# refusal instead; inside WSL 2 it is Linux, and runs as on any Linux.
 set -euo pipefail
 
 package="${1:?usage: install-smoke.sh <tarball | version> [native] [docker]}"
@@ -27,7 +30,27 @@ fi
 
 echo "== install $spec"
 npm install --global --prefix "$work/prefix" --no-fund "$spec"
-bin="$work/prefix/bin/cynos"
+
+# npm puts a global bin in the prefix itself on Windows, and in its bin/ elsewhere.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) windows=1 bin="$work/prefix/cynos" ;;
+  *) windows='' bin="$work/prefix/bin/cynos" ;;
+esac
+
+# The CLI's runtime guard refuses Windows before anything else loads, with exit 2 and a message
+# naming WSL 2: no scan could start there (its doc comment says why).
+if [ -n "$windows" ]; then
+  echo "== Windows: cynos refuses and points to WSL 2"
+  status=0
+  output="$("$bin" --version 2>&1)" || status=$?
+  if [ "$status" != 2 ] || ! grep -q 'WSL 2' <<< "$output"; then
+    echo "cynos --version on Windows exited $status, not 2 with the WSL 2 message:" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+  echo "install smoke ($version, Windows: refused) passed"
+  exit 0
+fi
 
 echo "== --version and --help"
 installed="$("$bin" --version)"

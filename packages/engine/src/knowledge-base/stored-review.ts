@@ -4,7 +4,8 @@
  *
  * A full scan's review costs minutes of a Codex agent; a diff changes a few files, and upstream's
  * diff workflow would otherwise model the whole repository again on every run. So a full build
- * stores its review in the knowledge-base cache (cache.ts, carried by the action's ci-cache.ts), and a diff:
+ * stores its review in the knowledge-base cache (cache.ts, carried by the action's ci-cache.ts), as
+ * does a diff that found none and built its own (diff.ts buildThreatModel), and a diff:
  *
  *   load     the stored review of the latest full scan the cache holds
  *   check    every citation against the current checkout: a file that no longer exists, or a line
@@ -36,8 +37,14 @@ export interface StoredReview {
   review: ArchitectureReview;
 }
 
-/** What reuse did to the stored review. */
+/** Where a diff's threat model came from, and what reuse did to it. */
 export interface ReuseStats {
+  /**
+   * stored: a full scan's review, restored from the cache. built: none was stored, or it was of a
+   * commit outside this checkout's history, so the diff reviewed the whole repository at HEAD
+   * itself (diff.ts buildThreatModel); `sha` is then HEAD, and nothing was cut or redacted.
+   */
+  source: 'stored' | 'built';
   sha: string;
   citations: number;
   cut: number;
@@ -77,5 +84,5 @@ export function reuseReview(
   const { invalid, total } = invalidCitations(review, files);
   const cut = cutInvalid(review, invalid, files);
   const redacted = redactSecretLiterals(review, rows);
-  return { review, stats: { sha: stored.sha, citations: total, cut, redacted } };
+  return { review, stats: { source: 'stored', sha: stored.sha, citations: total, cut, redacted } };
 }

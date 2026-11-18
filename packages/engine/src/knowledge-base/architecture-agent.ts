@@ -16,10 +16,12 @@
  *                               control, a sensitive operation or configuration: each is read
  *                               from a representative file or dismissed with a reason, since an
  *                               architecture review needs every component, not every file
- *   4  is checked in code       what it read comes from the line numbers its commands printed; a
- *                               component it neither read nor dismissed, or a citation of a line
- *                               it never saw, goes back to the same session once, and what is
- *                               still invalid is cut
+ *   4  is checked in code       its final message must be the review's JSON object: one that is
+ *                               not (a quote left unescaped inside a string) is asked for again
+ *                               in the same session once. What it read comes from the line
+ *                               numbers its commands printed; a component it neither read nor
+ *                               dismissed, or a citation of a line it never saw, goes back to the
+ *                               same session once, and what is still invalid is cut
  *
  * It runs through cynos with the router and the quality judge switched off for this agent alone
  * (`x-cy-eh-task-route: off`, `x-cy-eh-domain-expert-judge: off`), as `codex exec` in Codex's
@@ -385,6 +387,11 @@ ${input.maintained}Core evidence:
 ${input.core}`;
 }
 
+/** The follow-up for a final message that holds no review: the whole review again, as valid JSON. */
+function resendReview(problem: string): string {
+  return `Your final message holds no review this run can read: ${problem}.\n\nAnswer with the whole review again: the JSON object alone, valid JSON, with every double quote inside a string escaped as \\".`;
+}
+
 function followUp(missing: ChecklistItem[], invalid: string[]): string {
   const lists = [
     missing.length
@@ -574,6 +581,22 @@ export function answerJson(text: string): ArchitectureReview | undefined {
   return review.threatModel.summary ? review : undefined;
 }
 
+/**
+ * Why a final message holds no review, for the agent to correct: the parser's error when its
+ * object does not parse (models leave a quote inside a string unescaped), or what it lacks.
+ */
+function answerProblem(text: string): string {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end < start) return 'it holds no JSON object';
+  try {
+    JSON.parse(text.slice(start, end + 1));
+  } catch (error) {
+    return `its JSON object does not parse (${error instanceof Error ? error.message : String(error)})`;
+  }
+  return 'its JSON object has no threatModel.summary';
+}
+
 interface Session {
   status: number | null;
   events: string;
@@ -635,9 +658,9 @@ function accounted(
 }
 
 /**
- * Steps 1-4: the review from one agent, with one follow-up in the same session when it skipped
- * checklist files or cited lines it did not read. `invalidOf` returns a review's citations that
- * are not among the lines read.
+ * Steps 1-4: the review from one agent, with a follow-up in the same session when its final
+ * message holds no review, and one when the review skipped checklist files or cited lines it did
+ * not read. `invalidOf` returns a review's citations that are not among the lines read.
  */
 export async function agentReview(
   plan: AgentPlan,
@@ -665,7 +688,16 @@ export async function agentReview(
   let read = linesRead(log, input.corePrinted, plan.paths.project);
   let last = first;
   let sessions = 1;
-  // 4. One follow-up in the same session when the review skipped checklist files or cites
+  // 4. A session that finished without a readable review is asked for it once more: the review
+  // is in its context, and starting over would lose every command it ran.
+  if (!review && first.status === 0 && !first.timedOut) {
+    last = await session(plan, resendReview(answerProblem(first.answer)), true);
+    sessions += 1;
+    log += last.events;
+    read = linesRead(log, input.corePrinted, plan.paths.project);
+    review = last.timedOut ? undefined : answerJson(last.answer);
+  }
+  // One follow-up in the same session when the review skipped checklist files or cites
   // lines the agent never read.
   if (review) {
     const missing = items.filter(i => !accounted(i, read, review as ArchitectureReview));

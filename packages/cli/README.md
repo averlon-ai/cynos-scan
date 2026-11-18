@@ -31,7 +31,7 @@ bun install --frozen-lockfile
 bun run build
 mkdir -p dist
 npm pack --workspace @averlon-ai/cynos --pack-destination dist
-npm install --global ./dist/averlon-ai-cynos-0.1.1.tgz
+npm install --global ./dist/averlon-ai-cynos-0.2.0.tgz
 ```
 
 Use the version in `packages/cli/package.json` when selecting the tarball.
@@ -83,7 +83,7 @@ runtimes, diff-scans, knowledge-base, scan-inputs, exit-codes, env).
 | `--runtime native\|docker` | Where upstream runs (default `native`, or `CYNOS_SCAN_RUNTIME`). |
 | `--host-path HERE=HOST` | Docker runtime, with cynos in a container driving the host's Docker through its socket: the directory HERE is HOST on the Docker host (repeatable). The daemon resolves bind mounts there. |
 | `--headless` | Plain progress lines instead of the live view and upstream's dashboard. |
-| `--format pretty\|json\|jsonl` | `json`: one JSON object on stdout (`scanId`, `scanStatus`, `scanDir`, `exitCode`, `counts`, …, `knowledgeBase`: what the knowledge base built, a full scan's or a diff's, told apart by its `kind`, `diffThreatModel`: the threat model a diff started from and whether it was updated, `rubric` and `falsePositives`: the scan's inputs, and `stopped`: why a stop ended the run). `jsonl`: every progress event, then the result. |
+| `--format pretty\|json\|jsonl` | `json`: one JSON object on stdout (`scanId`, `scanStatus`, `scanDir`, `exitCode`, `counts`, …, `knowledgeBase`: what the knowledge base built, a full scan's or a diff's, told apart by its `kind`, `diffThreatModel`: the threat model a diff started from (its `source`: `stored`, a full scan's, or `built`, one the diff built with none stored) and whether it was updated, `rubric` and `falsePositives`: the scan's inputs, and `stopped`: why a stop ended the run). `jsonl`: every progress event, then the result. |
 
 Ctrl-C once stops the scan gracefully and keeps what it has; twice exits at once (130). Any stop
 (Ctrl-C, SIGTERM or `--timeout`) also kills the run's scanner containers on the docker runtime.

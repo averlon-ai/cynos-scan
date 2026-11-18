@@ -56,8 +56,11 @@ architecture review brought up to date when the change touches what it describes
 for each helper's part of the change. The helpers start at once, each from its brief.
 
 A diff starts from the last full scan's threat model, kept in the knowledge-base cache (help
-knowledge-base). With none stored for the repository, the scan fails before it starts: run a
-full scan first. --no-knowledge-base runs the diff on upstream's own workflow instead.
+knowledge-base). With none stored for the repository, or one of a commit outside HEAD's history,
+the diff first reviews the whole repository at HEAD, as a full scan does, and keeps that review
+for the next diff: cached labels answer the files the change left alone, but the first such diff
+takes as long as a full scan's knowledge base. --no-knowledge-base runs the diff on upstream's
+own workflow instead.
 
   ${CLI_NAME} scan . --diff origin/main     the changes since origin/main
   ${CLI_NAME} scan . --since-last-scan      the changes since this repository's last completed scan
@@ -76,8 +79,9 @@ Every model call it makes goes through cynos with the cynos key, and Jev's spend
 
 The cache (Jev's answers, the code graph, the stored architecture review) is kept between
 scans as one snapshot per scanned commit in <state>/averlon/knowledge-base-cache/. A diff scan
-restores its base commit's snapshot to start from that review and reuse Jev's answers; it never
-saves one.\`${CLI_NAME} gc\` prunes old snapshots;
+restores its base commit's snapshot to start from that review and reuse Jev's answers, else the
+newest snapshot of a commit in HEAD's history, else the newest. It saves one only when it built
+its own threat model. \`${CLI_NAME} gc\` prunes old snapshots;
 \`${CLI_NAME} scans show <id>\` prints what the knowledge base gave a scan.`,
   },
   'scan-inputs': {

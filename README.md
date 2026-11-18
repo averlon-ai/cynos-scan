@@ -8,7 +8,8 @@ with three additions:
 - a knowledge base the scan reads instead of searching: a code graph, labelled entry points and
   sinks, an architecture review, and one brief for each helper;
 - diff scans get a knowledge base for the change: the call paths through every changed function,
-  the last full scan's threat model brought up to date, and one brief for each helper.
+  the last full scan's threat model brought up to date (or, with none stored, one built for the
+  diff), and one brief for each helper.
 
 Install the CLI from npm:
 
@@ -63,7 +64,8 @@ bash scripts/install-smoke.sh <packed cynos .tgz> native   # the same, as npm in
 
 - **CI** runs tests on Linux and macOS, checks workflow security, builds both packages, and
   runs a native mock scan and dependency audit against the packed CLI. PR jobs have read-only
-  permissions and no release credentials.
+  permissions and no release credentials. Installation checks also verify Windows guidance and
+  run the packed CLI in Ubuntu on WSL 2.
 - **Stage npm release** runs manually from `main`. It repeats CI, then stages the tested tarballs
   through the protected `npm-publish` environment. A maintainer reviews and approves the staged
   packages with npm 2FA before they become available to users.

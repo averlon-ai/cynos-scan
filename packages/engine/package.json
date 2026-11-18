@@ -1,6 +1,6 @@
 {
   "name": "@averlon-ai/cynos-scan-engine",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "license": "Apache-2.0",
   "description": "Upstream @openai/codex-security through cynos with a knowledge base: the scan engine behind the cynos CLI and the cynos-scan action",
   "type": "module",

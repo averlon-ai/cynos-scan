@@ -1,0 +1,90 @@
+name: Windows installation smoke tests
+
+# Windows must fail with guidance to use WSL 2; WSL 2 must complete a native mock scan.
+# Both jobs install the calling run's tested tarball without registry credentials.
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Artifact containing the packed CLI from this workflow run
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows / Node 24 / unsupported-platform guidance
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+      - name: Check Windows refusal
+        run: bash scripts/install-smoke.sh dist/averlon-ai-cynos-[0-9]*.tgz
+
+  # Windows users run cynos in WSL 2: the same smoke test in Ubuntu there, as a user who is not root
+  # (root can create the namespaces Codex's sandbox needs even where a user cannot). WSL reads this
+  # Windows checkout through /mnt, and works in its own file system under the home directory.
+  wsl:
+    name: windows-2025 / WSL 2 Ubuntu 24.04 / node 24 / native
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: '2'
+          additional-packages: ca-certificates curl git python3 xz-utils
+      # WSL 1 translates Linux calls rather than running a Linux kernel, and has no namespaces for
+      # Codex's sandbox: make sure this is WSL 2, whose kernel names itself WSL2.
+      - name: Check WSL 2
+        shell: wsl-bash {0}
+        run: |
+          uname -r
+          uname -r | grep -q WSL2
+      # Node from nodejs.org, checked against its published checksums, and the user that scans.
+      - name: Install Node 24 and a user
+        shell: wsl-bash {0}
+        run: |
+          cd "$(mktemp -d)"
+          base=https://nodejs.org/dist/latest-v24.x
+          curl -fsSLO "$base/SHASUMS256.txt"
+          file="$(grep -o 'node-v[0-9.]*-linux-x64\.tar\.xz' SHASUMS256.txt | head -1)"
+          curl -fsSLO "$base/$file"
+          grep " $file\$" SHASUMS256.txt | sha256sum -c -
+          tar -xJf "$file" -C /usr/local --strip-components=1
+          node --version
+          useradd --create-home --shell /bin/bash smoke
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+      - name: Install and scan
+        shell: wsl-bash -u smoke {0}
+        env:
+          CYNOS_SCAN_E2E: '1'
+          CYNOS_NO_UPDATE_NOTICE: '1'
+          # wsl.exe passes a Windows variable into WSL only when WSLENV names it; /p translates a path.
+          WSLENV: GITHUB_WORKSPACE/p:CYNOS_SCAN_E2E:CYNOS_NO_UPDATE_NOTICE
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          package="$(ls dist/averlon-ai-cynos-[0-9]*.tgz)"
+          # Under the home directory, in WSL's own file system: not the Windows drive, not /tmp.
+          RUNNER_TEMP="$HOME/smoke" bash scripts/install-smoke.sh "$package" native

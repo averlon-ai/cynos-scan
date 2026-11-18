@@ -165,6 +165,18 @@ export interface ReviewUpdate {
   changedFunctions: Set<string>;
 }
 
+/**
+ * The repository's own threat model at `path` (repository-relative), for ReviewInput.maintained:
+ * undefined when no path is given or the checkout holds no text file there.
+ */
+export function maintainedThreatModel(
+  rows: FileRow[],
+  path: string | undefined
+): { path: string; text: string } | undefined {
+  const row = path ? rows.find(r => r.path === path) : undefined;
+  return row?.text !== undefined ? { path: row.path, text: row.text } : undefined;
+}
+
 const tokensOf = (chars: number): number => Math.ceil(chars / CHARS_PER_TOKEN);
 
 /** Upstream's reviewer instructions, for both the single call and the agent. */

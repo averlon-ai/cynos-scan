@@ -63,8 +63,6 @@ export interface DiffBriefingInput extends IndexInput {
   sinks: Map<string, string>;
   secretWindows: SecretWindow[];
   review: ArchitectureReview;
-  /** What step 5 did to the stored threat model, for the lead's index. */
-  threatModel: { from: string; gate: string[]; updated: boolean };
 }
 
 /** What every brief draws on. */
@@ -414,7 +412,6 @@ export function diffBriefing(input: DiffBriefingInput): DiffBriefing {
       .map(p => p.id)
       .join(', ') || (briefs.some(b => b.id === DIFF_BASELINE) ? DIFF_BASELINE : '');
   const kind = (path: string): string => shared.byPath.get(path)?.kind ?? 'deleted';
-  const tm = input.threatModel;
   const md = [
     '# Knowledge base index: a diff',
     '',
@@ -432,9 +429,7 @@ export function diffBriefing(input: DiffBriefingInput): DiffBriefing {
     '',
     '## Threat model',
     '',
-    tm.updated
-      ? `The full scan's of ${tm.from.slice(0, 12)}, updated for this change because ${tm.gate.slice(0, 8).join('; ')}${tm.gate.length > 8 ? `; and ${tm.gate.length - 8} more` : ''}. Use it unchanged.`
-      : `The full scan's of ${tm.from.slice(0, 12)}, unchanged: the change touches nothing it describes. Use it unchanged.`,
+    'Use it unchanged.',
     '',
     '## Helpers',
     '',

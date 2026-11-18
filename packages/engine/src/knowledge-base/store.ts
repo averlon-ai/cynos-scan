@@ -7,8 +7,15 @@
  * benchmark keep it on disk. And a diff wants a particular snapshot, the one its base commit's
  * full scan saved (its review is the diff's threat model), not merely the newest:
  *
- *   restore  this commit's snapshot, else a preferred commit's (a diff's base), else the newest
+ *   restore  this commit's snapshot, else a preferred commit's (a diff's base), else the newest of
+ *            a commit in this checkout's history, else the newest
  *   save     the directory as this commit's snapshot, unless it was restored from that one
+ *
+ * The newest snapshot is often not in the checkout's history: a pull request branched before the
+ * default branch's latest full scan. Its review then cannot be updated for the change since (the
+ * diff would review the whole repository again), and its answers are of files the branch does not
+ * have; an older snapshot of an ancestor gives both. The newest stays last: its answers still
+ * answer the files neither side changed.
  *
  * Snapshots are immutable, one per scanned commit, as Actions cache entries are, so two scans of
  * one repository never write the same directory: each restores into its own and saves a new
@@ -28,8 +35,16 @@ import { join } from 'node:path';
 
 /** Carries the knowledge-base cache between scans: immutable snapshots, one per scanned commit. */
 export interface KnowledgeBaseStore {
-  /** Fills dir with this commit's snapshot, else a preferred commit's, else the newest; returns its key. */
-  restore(dir: string, sha: string, preferred: string[]): Promise<string | undefined>;
+  /**
+   * Fills dir with this commit's snapshot, else a preferred commit's, else the newest of a commit
+   * `inHistory` accepts, else the newest; returns its key.
+   */
+  restore(
+    dir: string,
+    sha: string,
+    preferred: string[],
+    inHistory: (sha: string) => boolean
+  ): Promise<string | undefined>;
   /** Saves dir as this commit's snapshot, unless it was restored from that key. */
   save(dir: string, sha: string, restored: string | undefined): Promise<void>;
 }
@@ -56,8 +71,13 @@ export class LocalKnowledgeBaseStore implements KnowledgeBaseStore {
     this.snapshots = join(root, STORE_VERSION);
   }
 
-  async restore(dir: string, sha: string, preferred: string[]): Promise<string | undefined> {
-    const key = this.chooseSnapshot(sha, preferred);
+  async restore(
+    dir: string,
+    sha: string,
+    preferred: string[],
+    inHistory: (sha: string) => boolean
+  ): Promise<string | undefined> {
+    const key = this.chooseSnapshot(sha, preferred, inHistory);
     if (!key) {
       this.log('no knowledge-base cache yet');
       return undefined;
@@ -86,11 +106,18 @@ export class LocalKnowledgeBaseStore implements KnowledgeBaseStore {
     this.prune();
   }
 
-  /** This commit's snapshot, else the first preferred one present, else the newest. */
-  private chooseSnapshot(sha: string, preferred: string[]): string | undefined {
+  /**
+   * This commit's snapshot, else the first preferred one present, else the newest of an ancestor,
+   * else the newest.
+   */
+  private chooseSnapshot(
+    sha: string,
+    preferred: string[],
+    inHistory: (sha: string) => boolean
+  ): string | undefined {
     const present = this.snapshotsNewestFirst();
     for (const candidate of [sha, ...preferred]) if (present.includes(candidate)) return candidate;
-    return present[0];
+    return present.find(inHistory) ?? present[0];
   }
 
   private snapshotsNewestFirst(): string[] {
