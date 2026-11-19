@@ -66,7 +66,7 @@ bash scripts/install-smoke.sh <packed cynos .tgz> native   # the same, as npm in
   runs a native mock scan and dependency audit against the packed CLI. PR jobs have read-only
   permissions and no release credentials. Installation checks also verify Windows guidance and
   run the packed CLI in Ubuntu on WSL 2.
-- **Publish** runs manually from `main`. It publishes the scanner image to
+- **Stage npm release** runs manually from `main`. It publishes the scanner image to
   `ghcr.io/averlon-ai/cynos-scan`, repeats CI with the packages pinning that image, then stages
   the tested tarballs through the protected `npm-publish` environment. A maintainer reviews and
   approves the staged packages with npm 2FA before they become available to users.
@@ -80,7 +80,7 @@ bash scripts/install-smoke.sh <packed cynos .tgz> native   # the same, as npm in
 
 The packages are `@averlon-ai/cynos` and `@averlon-ai/cynos-scan-engine` on npmjs.com.
 Both package manifests must contain the same stable version. Merge the version changes and the
-updated `bun.lock` through review, then dispatch `publish.yml` from `main`.
+updated `bun.lock` through review, then dispatch `npm-publish.yml` from `main`.
 
 The release first publishes the docker runtime's scanner image, and the packages pin it. It builds
 `packages/engine/assets/Dockerfile` natively for amd64 and arm64 and scans every layer for

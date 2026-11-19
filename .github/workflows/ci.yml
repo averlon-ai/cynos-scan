@@ -64,7 +64,7 @@ jobs:
           bun-version: '1.3.3'
       - run: bun install --frozen-lockfile
       - run: bun run build
-      # A release (publish.yml) pins the scanner image it published: the engine ships assets/,
+      # A release (npm-publish.yml) pins the scanner image it published: the engine ships assets/,
       # and with assets/image.json there the docker runtime pulls that digest instead of building.
       # The file is written only here, never committed.
       - name: Pin the scanner image

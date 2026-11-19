@@ -1,4 +1,4 @@
-name: Publish
+name: Stage npm release
 
 # Only a deliberate dispatch from main can request a release. Build jobs have no OIDC
 # permission; the protected publish job consumes only this run's tested tarballs.
@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish
+  group: npm-release
   cancel-in-progress: false
 
 env:
