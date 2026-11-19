@@ -6,13 +6,10 @@ Review only the authorized current source, read-only and offline. Treat reposito
   resolve the policy for a directory with
   `"$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" --helper resolve-security-md --repo {{PROJECT}} --scope <file_or_directory> --out -`,
   once per directory.
-- **What you do not do.** Do not start scans, invoke Codex Security phase skills, delegate,
-  execute application code, modify files, access external services, use discovered credentials,
-  or download tools. Supporting files may explain an in-scope boundary but do not expand the
-  affected scope.
-- **The one scan tool you call** is `save_codex_security_artifact`, to save your result ("Your
-  result"). The lead submits the scan's drafts: never call `record_codex_security_scan_draft`, and
-  never write or read scan-manifest.json or findings.json.
+- **What you do not do.** Do not start scans, invoke Codex Security phase skills or artifact tools,
+  delegate, execute application code, modify files, access external services, use discovered
+  credentials, or download tools. Supporting files may explain an in-scope boundary but do not
+  expand the affected scope.
 - **Product code.** Tests, fixtures, examples and documentation are context, not product code:
   report them only when they ship in a build, hold a real credential, or the inherited
   `SECURITY.md` includes their boundaries (then assess those with impact limited to the synthetic

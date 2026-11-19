@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { REPLACED_WORKFLOW_SHA256 } from '../constants';
 import { promptVariables, renderPrompt, withParts } from '../prompt-template';
@@ -22,7 +24,12 @@ interface Answers {
  * the lead runs it. Values are stored as copies, as they would be between `exec` calls, and the
  * same `stored` map can be passed to the next run.
  */
-async function run(name: string, answers: Answers, stored = new Map<string, unknown>()) {
+async function run(
+  name: string,
+  answers: Answers,
+  stored = new Map<string, unknown>(),
+  edit = (body: string) => body
+) {
   const output: string[] = [];
   const commands: string[] = [];
   const calls: { tool: string; args: Record<string, unknown> }[] = [];
@@ -44,7 +51,7 @@ async function run(name: string, answers: Answers, stored = new Map<string, unkn
     }
   );
   const body = renderPrompt(
-    readFileSync(join(SCRIPTS, name), 'utf8'),
+    edit(readFileSync(join(SCRIPTS, name), 'utf8')),
     promptVariables(DOCKER_PATHS, DOCKER_PATHS.promptScanDir)
   );
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
@@ -68,9 +75,16 @@ describe('the workflows and their scripts', () => {
     ...new Set(Object.values(REPLACED_WORKFLOW_SHA256).flatMap(files => Object.keys(files))),
   ].map(f => readFileSync(join(PROMPT, f), 'utf8'));
 
-  it('print every script some workflow names, and name only scripts that exist', () => {
+  // The helpers' sections are parts their documents include.
+  const parts = readdirSync(join(PROMPT, 'parts')).map(f =>
+    readFileSync(join(PROMPT, 'parts', f), 'utf8')
+  );
+
+  it('print every script some workflow or part names, and name only scripts that exist', () => {
     const named = new Set(
-      workflows.flatMap(p => [...p.matchAll(/^\{\{SCRIPT (.+)\}\}$/gm)].map(m => m[1]))
+      [...workflows, ...parts].flatMap(p =>
+        [...p.matchAll(/^\{\{SCRIPT (.+)\}\}$/gm)].map(m => m[1])
+      )
     );
     expect([...named].sort()).toEqual(
       readdirSync(SCRIPTS)
@@ -359,5 +373,200 @@ describe('merge-helper-results.js', () => {
       'packet_a: about packet_a',
       'packet_b: about packet_b',
     ]);
+  });
+
+  it("makes every identity a slug the draft tool takes, as upstream's workbench makes one", async () => {
+    // The draft tool's pattern for identity.anchor and identity.instance.
+    const SLUG = /^[a-z0-9][a-z0-9._/-]*$/;
+    const identified = (line: number, ruleId: string, identity: Record<string, string>) => ({
+      ...finding('a.py', line, ['CWE-89']),
+      ruleId,
+      identity,
+    });
+    const { stored } = await run(
+      'merge-helper-results.js',
+      {},
+      helpers({
+        packet_a: [
+          // Values the draft tool rejected in real scans: a path and a code name.
+          identified(1, 'ci-injection', { anchor: '.github/workflows/cynos-pr.yml' }),
+          identified(2, 'key-overwrite', {
+            anchor: 'provider-key-store',
+            instance: 'UpdateProviderKey-store-not-found-creates-key',
+          }),
+          identified(3, 'ssrf', { anchor: 'Résumé URL', instance: '***' }),
+          // Two that are one identity once slugged, and one already taking the split's first name.
+          identified(4, 'sqli', { anchor: 'LoginQuery' }),
+          identified(5, 'sqli', { anchor: 'loginquery' }),
+          identified(6, 'sqli', { anchor: 'loginquery', instance: 'saved-2' }),
+        ],
+      })
+    );
+    const merged = stored.get('merged') as { ruleId: string; identity: Record<string, string> }[];
+    expect(merged.map(f => f.identity)).toEqual([
+      { anchor: 'github/workflows/cynos-pr.yml' },
+      { anchor: 'provider-key-store', instance: 'updateproviderkey-store-not-found-creates-key' },
+      { anchor: 'resume-url', instance: 'finding-3' },
+      { anchor: 'loginquery' },
+      { anchor: 'loginquery', instance: 'saved-3' },
+      { anchor: 'loginquery', instance: 'saved-2' },
+    ]);
+    for (const { identity } of merged)
+      for (const value of Object.values(identity)) expect(value).toMatch(SLUG);
+    const keys = merged.map(f => JSON.stringify([f.ruleId, f.identity]));
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe('save-helper-result.js', () => {
+  /** The shells a helper's commands may run in: zsh on macOS and Kali, sh or bash elsewhere. */
+  const SHELLS = ['sh', 'bash', 'zsh'].filter(shell => Bun.which(shell));
+  /** Linux's limit on one argument (MAX_ARG_STRLEN), which the shell's whole command is. */
+  const ARGUMENT = 128 * 1024;
+
+  /** A scan dir of its own, which the script's commands run in as the docker runtime's. */
+  const scanDir = () => mkdtempSync(join(tmpdir(), 'helper-result-'));
+  const shell =
+    (dir: string, name = 'sh') =>
+    (cmd: string): string => {
+      const run = spawnSync(name, ['-c', cmd.replaceAll(DOCKER_PATHS.promptScanDir, dir)], {
+        encoding: 'utf8',
+      });
+      return run.stdout + run.stderr;
+    };
+  /** The script as a helper runs it: its task name in place. */
+  const as = (task: string) => (body: string) =>
+    body.replace("const task = '<task name>';", `const task = '${task}';`);
+  const save = (dir: string, result: unknown, name = 'sh', task = 'packet_auth') =>
+    run(
+      'save-helper-result.js',
+      { exec: shell(dir, name) },
+      new Map([['result', result]]),
+      as(task)
+    );
+  const saved = (dir: string, task = 'packet_auth') =>
+    JSON.parse(readFileSync(join(dir, 'artifacts/helpers', `${task}.json`), 'utf8'));
+
+  /** A whole result whose text a shell would read as more than text, if it could. */
+  const awkward = {
+    findings: [
+      {
+        title: "Path traversal in the user's upload: ../ and \\ é 中文 😀",
+        summary: "It runs $(id) and `id`; prints %s %d \\n; quotes \" and ' and '\\''",
+        locations: [{ path: 'app/up load.py', startLine: 3 }],
+      },
+    ],
+    resolved_questions: ['Line one\nline two\ttabbed, and EOF'],
+    fully_reviewed_files: ['app/up load.py'],
+  };
+
+  for (const name of SHELLS)
+    it(`saves the stored result where the lead reads it, whatever its text holds (${name})`, async () => {
+      const dir = scanDir();
+      try {
+        const { output, calls } = await save(dir, awkward, name);
+        expect(saved(dir)).toEqual(awkward);
+        expect(output).toBe(
+          'saved artifacts/helpers/packet_auth.json: findings=1 resolved_questions=1 fully_reviewed_files=1'
+        );
+        // The scan's tools refuse a helper; nothing but its shell writes the file.
+        expect(calls).toEqual([]);
+        expect(readdirSync(join(dir, 'artifacts/helpers'))).toEqual(['packet_auth.json']);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+  it('writes a large result in pieces each shorter than one argument, and replaces the last save', async () => {
+    const dir = scanDir();
+    try {
+      await save(dir, awkward);
+      const large = {
+        ...awkward,
+        findings: Array.from({ length: 300 }, (_, i) => ({
+          ...awkward.findings[0],
+          id: i,
+          code: "x'é".repeat(400),
+        })),
+      };
+      const { commands } = await save(dir, large);
+      expect(commands.length).toBeGreaterThan(3);
+      for (const cmd of commands) expect(Buffer.byteLength(cmd)).toBeLessThan(ARGUMENT);
+      expect(saved(dir)).toEqual(large);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the last whole save in place when a save is cut short', async () => {
+    const dir = scanDir();
+    try {
+      await save(dir, awkward);
+      const large = {
+        ...awkward,
+        findings: Array.from({ length: 100 }, () => ({ code: 'y'.repeat(2000) })),
+      };
+      // Every piece after the first is lost, as when the helper is stopped mid-save.
+      const lossy = (cmd: string) => (cmd.includes(' >> ') ? '' : shell(dir)(cmd));
+      const cut = run(
+        'save-helper-result.js',
+        { exec: lossy },
+        new Map([['result', large]]),
+        as('packet_auth')
+      );
+      await expect(cut).rejects.toThrow('Not saved; the last one stays in place');
+      expect(saved(dir)).toEqual(awkward);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('runs no command without its task name, or without a whole stored result', async () => {
+    const commands: string[] = [];
+    const exec = (cmd: string) => (commands.push(cmd), '');
+    await expect(
+      run('save-helper-result.js', { exec }, new Map([['result', awkward]]))
+    ).rejects.toThrow('Put your task name in the script\'s second line, not "<task name>".');
+    // A name the lead does not read, or that would leave the directory.
+    await expect(save('/nowhere', awkward, 'sh', '../packet_auth')).rejects.toThrow(
+      'Put your task name'
+    );
+    await expect(
+      run(
+        'save-helper-result.js',
+        { exec },
+        new Map([['result', { findings: [] }]]),
+        as('packet_auth')
+      )
+    ).rejects.toThrow("First store('result', ...) your whole result");
+    await expect(
+      run('save-helper-result.js', { exec }, new Map(), as('packet_auth'))
+    ).rejects.toThrow('First store');
+    expect(commands).toEqual([]);
+  });
+
+  it("is what the lead's read-helper-results.js reads, and a partial file is not", async () => {
+    const dir = scanDir();
+    try {
+      await save(dir, awkward, 'sh', 'packet_auth');
+      await save(
+        dir,
+        { findings: [], resolved_questions: [], fully_reviewed_files: ['b.py'] },
+        'sh',
+        'baseline_auditor'
+      );
+      spawnSync('sh', [
+        '-c',
+        `printf '{"findings": [' > '${dir}/artifacts/helpers/.packet_db.json.partial'`,
+      ]);
+      const { stored, output } = await run('read-helper-results.js', { exec: shell(dir) });
+      expect(stored.get('helper_packet_auth')).toEqual(awkward);
+      expect(stored.get('helper_names')).toEqual(['baseline_auditor', 'packet_auth']);
+      expect(output).not.toContain('packet_db');
+      expect(output).toContain('REVIEWED 2');
+      expect(existsSync(join(dir, 'artifacts/helpers/.packet_db.json.partial'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { mockEngine } from './engine-mock';
 
 mockEngine();
-const { findRunDir, latestRunDir } = await import('../commands/history');
+const { findRunDir, latestRunDir } = await import('../commands/scans');
 const { staleRunDirs } = await import('../commands/gc');
 const { linkScanId } = await import('../commands/scan');
 

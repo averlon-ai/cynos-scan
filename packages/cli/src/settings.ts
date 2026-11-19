@@ -1,12 +1,13 @@
 /**
  * The CLI's settings from the environment, and where it keeps its files.
  *
- * Storage follows upstream: history, logs and results live in upstream's state dir
+ * Storage follows upstream: a native scan's history and scan dir live in upstream's state dir
  * (CODEX_SECURITY_STATE_DIR, else $CODEX_HOME/state/plugins/codex-security), which the CLI
- * never overrides. What upstream has no place for lives beside it, under <state>/averlon/:
+ * never overrides for it. Everything else lives beside them, under <state>/averlon/:
  *
- *   <state>/averlon/scans/<run name>/    a scan's run dir: its extras (run.json, briefs, the
- *                                        CLI's log, events and timings)
+ *   <state>/averlon/scans/<run name>/    a scan's run dir, on either runtime: its result, the
+ *                                        engine's validated reports and run.json, the briefs,
+ *                                        the CLI's log, events and timings (what `scans` reads)
  *   <state>/averlon/scans/<scan id>      a link to it, once upstream's scan id is known
  *   <state>/averlon/knowledge-base-cache/  the knowledge-base snapshots between scans
  *
@@ -23,14 +24,16 @@ export const ENVIRONMENT: [name: string, effect: string][] = [
   ['CYNOS_API_KEY', 'The cynos key; takes precedence over the saved login.'],
   ['CYNOS_BASE_URL', 'The cynos endpoint (default: https://api.cynos.averlon.ai/v1).'],
   ['CYNOS_SCAN_RUNTIME', 'The default runtime: native (default) or docker.'],
-  ['CYNOS_SCAN_MODEL', 'The default scan model.'],
   ['CYNOS_LOG_LEVEL', 'debug for diagnostics; passed to upstream as CODEX_SECURITY_LOG_LEVEL.'],
   ['CYNOS_CREDENTIAL_STORE', 'keychain (default where available) or file.'],
   ['CYNOS_NO_UPDATE_NOTICE', 'Set to turn off the daily update notice.'],
   ['NO_UPDATE_NOTIFIER', 'Set to turn off the daily update notice.'],
   ['CI', 'Set in CI: no prompts, no live view, no update notice.'],
   ['NO_COLOR', 'Set to turn off colour.'],
-  ['CODEX_SECURITY_STATE_DIR', "upstream's state dir: history, logs, results, our extras."],
+  [
+    'CODEX_SECURITY_STATE_DIR',
+    "upstream's state dir: native scans' history, and every scan's run dir under averlon/.",
+  ],
   [
     'CODEX_HOME',
     "Codex's home; the state dir defaults to $CODEX_HOME/state/plugins/codex-security.",
@@ -48,6 +51,36 @@ export function maxHypothesisPackets(env: NodeJS.ProcessEnv = process.env): numb
   if (!/^\d+$/.test(value.trim()))
     throw new CliError('usage', `CYNOS_SCAN_HYPOTHESES takes a whole number, not ${value}`);
   return Number(value);
+}
+
+/**
+ * cynos's switches a scan can turn off, each with CYNOS_SCAN_NO_<SWITCH>=1: the quality judge, the
+ * task routing, and the knowledge base (a scan on upstream's own threat model). Undocumented on
+ * purpose (not in ENVIRONMENT), like CYNOS_SCAN_MODEL: they exist for benchmarks and debugging, and
+ * a user's scan should run with all three.
+ */
+export function scanSwitches(env: NodeJS.ProcessEnv = process.env): {
+  judge: boolean;
+  routing: boolean;
+  knowledgeBase: boolean;
+} {
+  return {
+    judge: !switchedOff(env, 'CYNOS_SCAN_NO_JUDGE'),
+    routing: !switchedOff(env, 'CYNOS_SCAN_NO_ROUTING'),
+    knowledgeBase: !switchedOff(env, 'CYNOS_SCAN_NO_KNOWLEDGE_BASE'),
+  };
+}
+
+/**
+ * Set to 1 turns the switch off; any other value is a typo that would run the scan with it on, so
+ * it is refused. Empty is unset, as for every variable the CLI reads (CYNOS_SCAN_RUNTIME, NO_COLOR):
+ * a workflow that maps an optional input to the variable sets it to "" when the input is not given.
+ */
+function switchedOff(env: NodeJS.ProcessEnv, name: string): boolean {
+  const value = env[name];
+  if (!value) return false;
+  if (value === '1') return true;
+  throw new CliError('usage', `${name} takes 1, not ${value}`);
 }
 
 /** The runtime a scan uses unless --runtime says otherwise: CYNOS_SCAN_RUNTIME, else native. */
@@ -97,6 +130,12 @@ export function runsDir(stateDir: string): string {
 export function knowledgeBaseCacheDir(stateDir: string): string {
   return join(averlonDir(stateDir), 'knowledge-base-cache');
 }
+
+/**
+ * A native mock scan's own upstream state dir, inside its run dir (scanConfig): its synthetic
+ * findings stay out of upstream's history.
+ */
+export const MOCK_STATE_DIR = 'mock-state';
 
 /** The files the CLI writes into a run dir, beside the engine's own. */
 export const RUN_FILES = {

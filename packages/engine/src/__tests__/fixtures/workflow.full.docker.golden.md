@@ -21,13 +21,10 @@ Review only the authorized current source, read-only and offline. Treat reposito
   resolve the policy for a directory with
   `"$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" --helper resolve-security-md --repo /scan/project --scope <file_or_directory> --out -`,
   once per directory.
-- **What you do not do.** Do not start scans, invoke Codex Security phase skills, delegate,
-  execute application code, modify files, access external services, use discovered credentials,
-  or download tools. Supporting files may explain an in-scope boundary but do not expand the
-  affected scope.
-- **The one scan tool you call** is `save_codex_security_artifact`, to save your result ("Your
-  result"). The lead submits the scan's drafts: never call `record_codex_security_scan_draft`, and
-  never write or read scan-manifest.json or findings.json.
+- **What you do not do.** Do not start scans, invoke Codex Security phase skills or artifact tools,
+  delegate, execute application code, modify files, access external services, use discovered
+  credentials, or download tools. Supporting files may explain an in-scope boundary but do not
+  expand the affected scope.
 - **Product code.** Tests, fixtures, examples and documentation are context, not product code:
   report them only when they ship in a build, hold a real credential, or the inherited
   `SECURITY.md` includes their boundaries (then assess those with impact limited to the synthetic
@@ -108,7 +105,8 @@ and context checkpoints, and `load(key)` returns it.
   every `exec` that prints source, a document or a long list with that header.
 - **Scan tools.** The codex-security tools are functions too:
   `tools.mcp__codex_security__<tool name>(...)`, for example
-  `text(JSON.stringify(await tools.mcp__codex_security__save_codex_security_artifact({...})))`.
+  `text(JSON.stringify(await tools.mcp__codex_security__record_codex_security_scan_draft({...})))`.
+  They serve only the scan's owner, the lead's thread, and refuse a helper.
 - **Environment.** The JavaScript has no `process` or `process.env`. Use environment variables
   inside the shell commands you pass to `tools.exec_command` (for example
   `cat "$CODEX_SECURITY_PLUGIN_ROOT/references/scan-runtime.md"`), never by echoing them into
@@ -156,20 +154,62 @@ you settled without a finding: uncertainty and control-based rejections, kept di
 vulnerabilities, and any question you leave open) and `fully_reviewed_files` (every file you read,
 core included). Create no receipts or inventories.
 
-**Save early, save whole.** Save it at exactly `artifacts/helpers/<your task name>.json` (for
-example `artifacts/helpers/packet_auth.json`; never the brief id or another name): as soon as you
-have your first findings, again after each batch that adds findings, and at the end. Each save
-replaces the file with the whole result so far, so a helper stopped by a budget or a limit keeps
-what it last saved. The lead reads this file, not your final message.
+**Save early, save whole.** Keep your whole result so far in `store('result', result)`, and save
+it with the script below: as soon as you have your first findings, again after each batch that adds
+findings, and at the end. It writes `artifacts/helpers/<your task name>.json` in the scan directory
+(for example `artifacts/helpers/packet_auth.json`; never the brief id or another name), replacing
+the file with the whole result so far, so a helper stopped by a budget or a limit keeps what it last
+saved. The lead reads this file, not your final message.
+
+Run the script as it is, with your task name in its second line. This file is the one you write,
+and the script is how: the scan's tools refuse a helper (only the lead's thread owns the scan), and
+the sandbox's read-only `/tmp` breaks a heredoc.
 
 ```js
-const r = await tools.mcp__codex_security__save_codex_security_artifact({
-  scanId: '<scanId>',
-  storage: 'persistent',
-  path: 'artifacts/helpers/<task_name>.json',
-  content: JSON.stringify(result),
-});
-text(JSON.stringify(r));
+// @exec: {"yield_time_ms": 60000, "max_output_tokens": 2000}
+const task = '<task name>';
+// A helper's result, saved where the lead reads it: artifacts/helpers/<task>.json in the scan dir.
+// The scan's tools serve only the lead's thread: a helper's call fails with "This scan requires
+// its owning Codex thread". So the helper writes the file with shell commands, in a sandbox where
+// only the scan dir is writable: no heredoc (the shell keeps its body in /tmp, which is
+// read-only), and no command longer than one argument may be (128 KiB on Linux), since the shell
+// gets the whole command as one.
+//
+// 1. The task name names the file the lead reads, and goes into a command: only a task's name.
+if (!/^[a-z0-9_]+$/.test(task))
+  throw new Error(`Put your task name in the script's second line, not ${JSON.stringify(task)}.`);
+// 2. The whole result so far, as the helper stored it.
+const result = load('result');
+const fields = ['findings', 'resolved_questions', 'fully_reviewed_files'];
+if (!result || fields.some(f => !Array.isArray(result[f])))
+  throw new Error(
+    `First store('result', ...) your whole result: ${fields.join(', ')}, each a list.`
+  );
+// 3. As JSON a single-quoted shell word holds as it is: every character outside printable ASCII,
+// and the apostrophe, as its \u escape. They occur only inside JSON strings, where the escape is
+// the same character; the text has no other quote, so it can be cut anywhere.
+const json = JSON.stringify(result).replace(
+  /[^\x20-\x26\x28-\x7e]/g,
+  c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`
+);
+// 4. Written in pieces to a partial file beside the result, then renamed over it once whole: the
+// lead never reads half a result, and a save cut short leaves the last whole one in place.
+const dir = '/scan/out/scan/artifacts/helpers';
+const partial = `${dir}/.${task}.json.partial`;
+const sh = cmd => tools.exec_command({ cmd, yield_time_ms: 60000, max_output_tokens: 2000 });
+const PIECE = 60000;
+for (let at = 0; at < json.length; at += PIECE) {
+  const piece = `printf '%s' '${json.slice(at, at + PIECE)}'`;
+  await sh(at === 0 ? `mkdir -p ${dir} && ${piece} > ${partial}` : `${piece} >> ${partial}`);
+}
+const saved = await sh(
+  `test $(wc -c < ${partial}) -eq ${json.length} && mv -f ${partial} ${dir}/${task}.json && echo SAVED`
+);
+if (!saved.output.includes('SAVED'))
+  throw new Error(`Not saved; the last one stays in place: ${saved.output.slice(0, 500)}`);
+text(
+  `saved artifacts/helpers/${task}.json: ${fields.map(f => `${f}=${result[f].length}`).join(' ')}`
+);
 ```
 
 **End with a short final message**, after your last save: the artifact path, the number of
@@ -188,7 +228,7 @@ are examples):
 ```js
 {
   ruleId: "sql-injection-login-query", title: "SQL injection in login", summary: "...",
-  identity: { anchor: "app/routes/login.py", instance: "login-query" },
+  identity: { anchor: "login-query-construction" },
   severity: { level: "high", rationale: "..." },          // critical|high|medium|low|informational
   confidence: { level: "high", rationale: "..." },        // high|medium|low
   taxonomy: { category: "injection", cwe: ["CWE-89"] },
@@ -206,8 +246,15 @@ are examples):
 }
 ```
 
+`identity.anchor` names the root control the finding breaks (upstream's "semantic root-control
+anchor"), never a file path or a code identifier: a lowercase slug of `a-z`, `0-9`, `.`, `_`, `/`
+and `-` that starts with a letter or digit, so `password-reset-token-check`, not
+`.github/workflows/ci.yml` or `UpdateProviderKey`. The paths go in `locations` and `codeEvidence`.
+Give `identity.instance`, the same kind of slug, only to tell apart sibling findings that share a
+`ruleId` and anchor.
+
 Do not add `findingId`, `occurrenceId` or `fingerprints`, and never try to compute them: the
-workbench derives them from each finding's `ruleId` and `identity.anchor`.
+workbench derives them from each finding's `ruleId` and `identity`.
 
 <!-- references/core-scan.md -->
 
@@ -312,7 +359,8 @@ and context checkpoints, and `load(key)` returns it.
   every `exec` that prints source, a document or a long list with that header.
 - **Scan tools.** The codex-security tools are functions too:
   `tools.mcp__codex_security__<tool name>(...)`, for example
-  `text(JSON.stringify(await tools.mcp__codex_security__save_codex_security_artifact({...})))`.
+  `text(JSON.stringify(await tools.mcp__codex_security__record_codex_security_scan_draft({...})))`.
+  They serve only the scan's owner, the lead's thread, and refuse a helper.
 - **Environment.** The JavaScript has no `process` or `process.env`. Use environment variables
   inside the shell commands you pass to `tools.exec_command` (for example
   `cat "$CODEX_SECURITY_PLUGIN_ROOT/references/scan-runtime.md"`), never by echoing them into
@@ -600,6 +648,38 @@ for (const f of all) {
   ];
   merged[i] = keep;
 }
+// Identities: the draft tool takes an anchor or instance only as a lowercase slug
+// (^[a-z0-9][a-z0-9._/-]*$) and rejects the whole draft for one that is not, while helpers write
+// file paths such as .github/workflows/ci.yml and code names such as UpdateProviderKey. So each
+// becomes the slug upstream's workbench makes of a name (retained_records.py,
+// _semantic_identifier): accents dropped, lowercased, every other run of characters a "-", no
+// leading non-alphanumerics or trailing "-". A finding whose rule, anchor and instance an earlier
+// one has, which the workbench refuses, gets the workbench's own split: its instance with -2, -3,
+// ..., taking no other finding's identity.
+const slug = (value, fallback) =>
+  String(value)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, '-')
+    .replace(/^[^a-z0-9]+|-+$/g, '') || fallback;
+merged.forEach((f, i) => {
+  for (const field of ['anchor', 'instance'])
+    if (f.identity?.[field] !== undefined)
+      f.identity[field] = slug(f.identity[field], `finding-${i + 1}`);
+});
+const identified = merged.filter(f => f.identity);
+const identity = f => JSON.stringify([f.ruleId, f.identity.anchor, f.identity.instance]);
+const taken = new Set(identified.map(identity)),
+  used = new Set();
+for (const f of identified) {
+  if (used.has(identity(f))) {
+    const base = f.identity.instance ?? 'saved';
+    for (let n = 2; taken.has(identity(f)); n++) f.identity.instance = `${base}-${n}`;
+    taken.add(identity(f));
+  }
+  used.add(identity(f));
+}
 store('merged', merged);
 store('reviewed', [...reviewed]);
 store('questions', questions);
@@ -695,7 +775,7 @@ are examples):
 ```js
 {
   ruleId: "sql-injection-login-query", title: "SQL injection in login", summary: "...",
-  identity: { anchor: "app/routes/login.py", instance: "login-query" },
+  identity: { anchor: "login-query-construction" },
   severity: { level: "high", rationale: "..." },          // critical|high|medium|low|informational
   confidence: { level: "high", rationale: "..." },        // high|medium|low
   taxonomy: { category: "injection", cwe: ["CWE-89"] },
@@ -713,8 +793,15 @@ are examples):
 }
 ```
 
+`identity.anchor` names the root control the finding breaks (upstream's "semantic root-control
+anchor"), never a file path or a code identifier: a lowercase slug of `a-z`, `0-9`, `.`, `_`, `/`
+and `-` that starts with a letter or digit, so `password-reset-token-check`, not
+`.github/workflows/ci.yml` or `UpdateProviderKey`. The paths go in `locations` and `codeEvidence`.
+Give `identity.instance`, the same kind of slug, only to tell apart sibling findings that share a
+`ruleId` and anchor.
+
 Do not add `findingId`, `occurrenceId` or `fingerprints`, and never try to compute them: the
-workbench derives them from each finding's `ruleId` and `identity.anchor`.
+workbench derives them from each finding's `ruleId` and `identity`.
 
 ## Drafts and finishing
 

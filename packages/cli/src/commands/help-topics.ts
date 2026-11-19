@@ -40,7 +40,11 @@ A saved key goes to the macOS keychain (security), the Secret Service on Linux (
                      --cap-drop ALL, a read-only checkout, no network for the preflight.
 
 Choose with --runtime, or CYNOS_SCAN_RUNTIME=docker. \`${CLI_NAME} doctor --runtime all\` checks
-both; \`doctor --fix\` installs what a runtime is missing (asking before sudo).
+both; \`doctor --fix\` installs what a runtime is missing, upstream's AppArmor profile on Linux
+included (asking before sudo).
+
+Both runtimes keep each scan in a run dir, so \`${CLI_NAME} scans\` lists, shows and exports a
+docker scan as it does a native one.
 
 The docker runtime's containers belong to the Docker daemon, which resolves their bind mounts on
 its own host. When cynos itself runs in a container and reaches the host's Docker through
@@ -59,13 +63,12 @@ A diff starts from the last full scan's threat model, kept in the knowledge-base
 knowledge-base). With none stored for the repository, or one of a commit outside HEAD's history,
 the diff first reviews the whole repository at HEAD, as a full scan does, and keeps that review
 for the next diff: cached labels answer the files the change left alone, but the first such diff
-takes as long as a full scan's knowledge base. --no-knowledge-base runs the diff on upstream's
-own workflow instead.
+takes as long as a full scan's knowledge base.
 
   ${CLI_NAME} scan . --diff origin/main     the changes since origin/main
   ${CLI_NAME} scan . --since-last-scan      the changes since this repository's last completed scan
 
---since-last-scan reads upstream's history (\`scans list\`). It diffs only when that scan's
+--since-last-scan reads this machine's scans (\`scans list\`). It diffs only when that scan's
 revision is an ancestor of HEAD; after a rebase or on another branch it runs a full scan and
 says why. A diff needs a clean checkout at HEAD.`,
   },
@@ -74,15 +77,13 @@ says why. A diff needs a clean checkout at HEAD.`,
     text: () => `Before a full scan, the engine builds a knowledge base for the scan to plan around: a code
 graph, Jev's labels, an architecture review, the review packets and a brief for each helper. A
 diff builds one sized to the change (help diff-scans).
-Every model call it makes goes through cynos with the cynos key, and Jev's spend stops at $10;
---no-knowledge-base scans on upstream's own threat model instead.
+Every model call it makes goes through cynos with the cynos key, and Jev's spend stops at $10.
 
 The cache (Jev's answers, the code graph, the stored architecture review) is kept between
 scans as one snapshot per scanned commit in <state>/averlon/knowledge-base-cache/. A diff scan
 restores its base commit's snapshot to start from that review and reuse Jev's answers, else the
 newest snapshot of a commit in HEAD's history, else the newest. It saves one only when it built
-its own threat model. \`${CLI_NAME} gc\` prunes old snapshots;
-\`${CLI_NAME} scans show <id>\` prints what the knowledge base gave a scan.`,
+its own threat model. \`${CLI_NAME} gc\` prunes old snapshots.`,
   },
   'scan-inputs': {
     summary: 'steering a scan: --rubric, --false-positives',
@@ -98,8 +99,8 @@ its own threat model. \`${CLI_NAME} gc\` prunes old snapshots;
 
 A dismissal names its finding by its title and at least one location, as the scan's
 findings.json has them, with its fingerprint (fingerprints.primary) when you have it, and needs a
-reason of up to 2400 characters. The scan reads them as reviewer feedback, as upstream reads its
-own (\`findings false-positive\`): it drops a finding only if the recorded reason still holds
+reason of up to 2400 characters. The scan reads them as reviewer feedback, as upstream reads the
+dismissals in its own history: it drops a finding only if the recorded reason still holds
 against the current source, so a dismissal never hides a finding the code has changed under.`,
   },
   'exit-codes': {

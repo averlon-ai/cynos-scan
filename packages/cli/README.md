@@ -6,35 +6,23 @@ through cynos, with what Averlon adds on top: a knowledge base built before each
 diff, sized to the change, with the last full scan's threat model brought up to date), and an
 optional hardened Docker runtime.
 
-History, logs and results are upstream's, in upstream's state dir, so `cs` and `cynos` see
-the same scans.
+Each scan's results and log are in its run dir, on either runtime, and `cynos scans` reads them
+there. upstream's own history (`codex-security scans`) has the native scans only: a docker scan's upstream
+kept its history in the container.
 
 ## Install
 
 `cynos` runs on macOS and Linux, with Node.js 22.13+ (22.x), 24.x or 26.x. On Windows, run it
 inside WSL 2.
 
-Install from npm:
+Install it from npm. No registry token or `~/.npmrc` entry is needed.
 
 ```bash
-npm install --global @averlon-ai/cynos
+npm i -g @averlon-ai/cynos      # or: pnpm add -g / bun add -g
 cynos --version
 ```
 
-No registry token or custom `.npmrc` entry is required. `cynos update` uses the package manager
-that installed the CLI. Cynos API authentication is separate: `cynos login` asks for your scan key.
-
-To build from source, run from the repository root with Bun 1.3 or later:
-
-```bash
-bun install --frozen-lockfile
-bun run build
-mkdir -p dist
-npm pack --workspace @averlon-ai/cynos --pack-destination dist
-npm install --global ./dist/averlon-ai-cynos-0.2.0.tgz
-```
-
-Use the version in `packages/cli/package.json` when selecting the tarball.
+Or without installing: `npx @averlon-ai/cynos scan .`
 
 ## Quick start
 
@@ -43,7 +31,7 @@ cynos login                 # paste your cynos key (masked); the only key a scan
 cynos doctor                # will my next scan work?
 cynos scan .                # a full scan of this checkout
 cynos scan . --since-last-scan
-cynos scans show            # the latest completed scan, with its knowledge-base summary
+cynos scans list            # every scan on this machine, native and docker alike
 ```
 
 In a terminal, `scan` shows a live view of its own phases (stage, preflight, knowledge, brief),
@@ -71,15 +59,10 @@ runtimes, diff-scans, knowledge-base, scan-inputs, exit-codes, env).
 | `--path PATH` | Limit the scan to a file or directory (repeatable). |
 | `--rubric FILE` | Grade severity with the rubric in FILE instead of upstream's default (upstream's `--rubric`; every helper prints it too). |
 | `--false-positives FILE` | A JSON array of findings reviewers dismissed, each with a `reason`, the finding's `title` and `locations`, and optionally its `fingerprint`. The scan drops a finding only if its recorded reason still holds (`help scan-inputs`). |
-| `--mode standard\|deep` | upstream's scan mode. |
-| `--model ID`, `--effort LEVEL` | The scan model (default: `CYNOS_SCAN_MODEL` or the engine's) and reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default) or `max`. |
-| `--max-time DURATION` | Deep-scan discovery limit: hours (`1.5`) or `90m` / `2h`, up to 96h. |
-| `--timeout DURATION` | Stop the whole run after DURATION and keep what it has: hours (`2`) or `90s` / `30m` / `2h`, up to 96h. A stopped run exits 2. Unlike `--max-time`, a hard limit, except for preparing the runtime, which runs to completion first: the docker runtime's scanner image (its build or pull) and the native runtime's code-graph binary (its one-time download). Prepare it beforehand (`doctor --fix`), and on docker pass `--no-build-image`, to keep the whole run inside the limit. |
+| `--timeout DURATION` | Stop the whole run after DURATION and keep what it has: hours (`2`) or `90s` / `30m` / `2h`, up to 96h. A stopped run exits 2. A hard limit, except for preparing the runtime, which runs to completion first: the docker runtime's scanner image (its build or pull) and the native runtime's code-graph binary (its one-time download). Prepare it beforehand (`doctor --fix`), and on docker pass `--no-build-image`, to keep the whole run inside the limit. |
 | `--scan-prompt-file FILE` | Append scan instructions from FILE to the scan prompt (upstream's flag name). |
-| `--no-judge`, `--no-routing` | Turn off cynos's quality judge or its task routing (both on by default). |
 | `--fail-on-severity LEVEL` | Exit 1 for findings at or above `critical`, `high`, `medium` or `low`. |
 | `--dry-run` | Validate the configuration only. |
-| `--no-knowledge-base` | Skip the knowledge base: upstream's own threat model. |
 | `--runtime native\|docker` | Where upstream runs (default `native`, or `CYNOS_SCAN_RUNTIME`). |
 | `--host-path HERE=HOST` | Docker runtime, with cynos in a container driving the host's Docker through its socket: the directory HERE is HOST on the Docker host (repeatable). The daemon resolves bind mounts there. |
 | `--headless` | Plain progress lines instead of the live view and upstream's dashboard. |
@@ -88,17 +71,18 @@ runtimes, diff-scans, knowledge-base, scan-inputs, exit-codes, env).
 Ctrl-C once stops the scan gracefully and keeps what it has; twice exits at once (130). Any stop
 (Ctrl-C, SIGTERM or `--timeout`) also kills the run's scanner containers on the docker runtime.
 
-### Review results (upstream's own commands)
+### Review results
 
 | Command | What it does |
 | --- | --- |
-| `scans list\|show\|logs\|compare\|rerun …` | upstream's scan history; `scans show` adds our knowledge-base summary. |
-| `findings list\|false-positive …` | upstream's findings. |
-| `export …` | Export findings (`--export-format sarif\|json\|csv`) or the threat model (`--artifact threat-model`). |
-| `logs [ID] [--follow] [--source upstream\|knowledge-base\|architecture]` | A scan's session events, or our knowledge-base and architecture-review log. |
+| `scans list [--json]` | Every scan on this machine, newest first: its id, when it finished, runtime, kind, status, findings and repository. |
+| `scans findings ID` | A scan's findings, most severe first. |
+| `scans export ID [--format sarif\|json\|md] [--output FILE]` | A scan's SARIF (the default), `findings.json` or Markdown report, to stdout or FILE. |
+| `scans logs [ID] [--follow]` | A scan's log (default: the newest run's, a running scan included). |
 
-Every option after these commands is passed to upstream unchanged (for example `--json`,
-`--format yaml`, `--scan ID`).
+An `ID` is a scan id, a unique prefix of one, or the run name of a run that never got one. These
+commands read each scan's run dir, which a native and a docker scan both have, so they work the
+same on either runtime. upstream's own history (`codex-security scans`) has only native scans.
 
 ### Sign in
 
@@ -122,7 +106,7 @@ included, through cynos.
 | `doctor [--runtime native\|docker\|all] [--fix] [--json] [--quick]` | Check this machine for a scan; `--fix` repairs what it can (asking before sudo). Exit 0 when nothing failed, else 2. |
 | `update [--check]` | Install the latest version with the package manager that installed this one, then `doctor --quick`. |
 | `info [--json]` | Versions, runtime, model, endpoint and paths. |
-| `debug bundle [ID] [--include-transcripts] [--output FILE] [--yes]` | A tarball to share for a scan, with every key scrubbed. |
+| `debug bundle [ID] [--output FILE] [--yes]` | A tarball to share for a scan, with every key scrubbed. |
 | `gc [--dry-run] [--yes]` | Remove stale run dirs, old knowledge-base snapshots and exited scan containers. |
 | `completion bash\|zsh\|fish` | Shell completion. |
 | `help [TOPIC\|COMMAND]` | Help topics, or a command's help. |
@@ -137,13 +121,12 @@ Global options: `-q, --quiet`, `-v, --verbose`, `--no-color`, `-V, --version`.
 | `CYNOS_API_KEY` | The cynos key; takes precedence over the saved login. |
 | `CYNOS_BASE_URL` | The cynos endpoint (default: `https://api.cynos.averlon.ai/v1`). |
 | `CYNOS_SCAN_RUNTIME` | The default runtime: `native` or `docker`. |
-| `CYNOS_SCAN_MODEL` | The default scan model. |
 | `CYNOS_LOG_LEVEL` | `debug` for diagnostics; passed to upstream as `CODEX_SECURITY_LOG_LEVEL`. |
 | `CYNOS_CREDENTIAL_STORE` | `file` to keep saved keys in the 0600 file instead of the keychain. |
 | `CYNOS_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER` | Turn off the daily update notice. |
 | `CI` | No prompts, no live view, no update notice. |
 | `NO_COLOR` | No colour. |
-| `CODEX_SECURITY_STATE_DIR`, `CODEX_HOME` | upstream's state dir (history, logs, results, and our extras under `averlon/`). |
+| `CODEX_SECURITY_STATE_DIR`, `CODEX_HOME` | upstream's state dir: native scans' upstream history, and every scan's run dir under `averlon/`, which `cynos scans` reads. |
 
 Keys from the environment are read once at startup and removed from it, so no child process
 inherits them.
@@ -168,8 +151,8 @@ The cause is on stderr, and with `--format json` in `error.kind` (`usage`, `auth
 
 | Path | What |
 | --- | --- |
-| `<state>/` | upstream's state dir: `$CODEX_SECURITY_STATE_DIR`, else `$CODEX_HOME/state/plugins/codex-security` (`~/.codex/…`). History, logs, scan results. |
-| `<state>/averlon/scans/<scan id>/` | Our extras for a scan: the engine's `run.json`, the knowledge base, `cli.log`, `events.jsonl`, `timings.json`. |
+| `<state>/` | upstream's state dir: `$CODEX_SECURITY_STATE_DIR`, else `$CODEX_HOME/state/plugins/codex-security` (`~/.codex/…`). A native scan's upstream history and scan dir. |
+| `<state>/averlon/scans/<run name>/` | A scan's run dir, on either runtime: its result (`cli-result.json`), the validated reports (`reports/`), the engine's `run.json`, the knowledge base, `cli.log`, `events.jsonl`, `timings.json`. A docker scan's upstream state dir is its `state/`. `<state>/averlon/scans/<scan id>` links to it. |
 | `<state>/averlon/knowledge-base-cache/` | Knowledge-base snapshots between scans, one per scanned commit. |
 | `~/.config/averlon/cynos/` | Without a keychain, the saved key in `credentials.json` (0600). |
 | `~/.cache/averlon/cynos/` | The update check's cache. |
@@ -178,17 +161,18 @@ The cause is on stderr, and with `--format json` in `error.kind` (`usage`, `auth
 
 1. `cynos doctor` (or `doctor --runtime all`) says what is missing and how to fix it;
    `doctor --fix` repairs what it can.
-2. `cynos logs [ID]` shows the scan's session events; `--source knowledge-base` our
-   knowledge-base log; `-v` (or `CYNOS_LOG_LEVEL=debug`) adds diagnostics to any command.
-3. `cynos debug bundle [ID]` writes one tarball with the scan's record, our extras, versions
-   and the doctor report. It lists every file and asks before writing; every known key is
-   replaced with `***`, and it refuses to write if a key is still present. Session transcripts
-   (which hold your source code) are included only with `--include-transcripts`.
+2. `cynos scans logs [ID]` shows the scan's log; `-v` (or `CYNOS_LOG_LEVEL=debug`) adds
+   diagnostics to any command.
+3. `cynos debug bundle [ID]` writes one tarball with the scan's run dir, versions and the doctor
+   report. It lists every file and asks before writing; every known key is replaced with `***`,
+   and it refuses to write if a key is still present. Session transcripts (which hold your source
+   code), databases and credentials are always left out.
 
 Common problems:
 
 - **"No cynos key"**: run `cynos login`, or set `CYNOS_API_KEY`.
-- **`update` cannot reach the registry**: check your network and npm registry configuration (`npm config get registry`). The public npm package needs no registry token.
+- **`update` cannot reach the registry**: check your network and npm's registry
+  (`npm config get registry`). The npm package needs no registry token.
 - **Node version errors**: install Node 24 (`nvm install 24`) and reinstall.
 
 ## License

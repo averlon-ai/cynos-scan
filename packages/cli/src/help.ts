@@ -9,7 +9,6 @@ import type { Command } from 'commander';
 import { CLI_NAME } from './context';
 
 const EXAMPLES = new WeakMap<Command, string[]>();
-const PASS_THROUGH = new WeakMap<Command, string>();
 
 /** Adds examples to a command's help (after its options, as `Examples:`). */
 export function withExamples(command: Command, examples: string[]): Command {
@@ -23,21 +22,6 @@ export function withExamples(command: Command, examples: string[]): Command {
 
 export function examplesOf(command: Command): string[] {
   return EXAMPLES.get(command) ?? [];
-}
-
-/** Marks a command whose options are upstream's own (history pass-through). */
-export function passesThrough(command: Command, upstreamCommand: string): Command {
-  PASS_THROUGH.set(command, upstreamCommand);
-  command.addHelpText(
-    'after',
-    `\nEvery other option is upstream's own and passes through unchanged: \`${upstreamCommand}\`\n` +
-      `(see https://learn.chatgpt.com/docs/security/cli). The state dir is upstream's, shared with \`cs\`.\n`
-  );
-  return command;
-}
-
-export function upstreamOf(command: Command): string | undefined {
-  return PASS_THROUGH.get(command);
 }
 
 /** Every command under root, depth first, with its full name (`scans list`). */

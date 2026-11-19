@@ -472,7 +472,7 @@ describe('checkKey', () => {
       '{"error":{"message":"could not auto resolve a provider for the request"}}',
       'model',
       /cannot serve the model m/,
-      /--model, or CYNOS_SCAN_MODEL/,
+      /Choose a model the key may use/,
     ],
     [503, 'upstream connect error', 'gateway', /could not answer the key check/, /Retry later/],
   ] as const)('names HTTP %i (%s) a %s refusal', async (status, body, refusal, failure, fix) => {

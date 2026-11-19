@@ -134,6 +134,22 @@ describe("the drafts, by upstream's draft tool schema", () => {
     }
   });
 
+  it('the identity example is a slug the schema takes, naming a control rather than a path', () => {
+    // The draft tool rejected leads' file paths and code names as anchors, copied from an example
+    // that was a file path.
+    const identity = schema.$defs['identity'] as unknown as {
+      properties: Record<string, { pattern: string }>;
+    };
+    const examples = [...TEMPLATE.matchAll(/identity: \{ ([^}]*) \}/g)].map(m => m[1]!);
+    expect(examples.length).toBeGreaterThan(0);
+    for (const example of examples)
+      for (const [, field, value] of example.matchAll(/(\w+): "([^"]*)"/g)) {
+        expect(value).toMatch(new RegExp(identity.properties[field!]!.pattern));
+        expect(value).not.toMatch(/\.\w+$|\//);
+      }
+    expect(TEMPLATE).toContain('never a file path or a code identifier');
+  });
+
   it('names only review state fields upstream declares', () => {
     const named = [...TEMPLATE.matchAll(/reviewState\.(\w+)/g)].map(m => m[1]!);
     expect(named.length).toBeGreaterThan(0);
@@ -247,6 +263,20 @@ describe('the workflow files', () => {
     expect(full).toContain('brief id\n`baseline`');
     expect(docker('full').helperContext).toContain('sh /scan/kb/kb read');
     expect(full).not.toMatch(/kb left|your checklist|checklist files/);
+  });
+
+  it("have a helper save its result with its script, never a scan tool, which refuses every thread but the lead's", () => {
+    for (const kind of KINDS) {
+      const context = docker(kind).helperContext;
+      // upstream's workbench answers a helper's call to any scan-bound tool, its artifact save
+      // included, with "This scan requires its owning Codex thread": no helper code calls one.
+      const code = [...context.matchAll(/^```js\n([\s\S]*?)^```$/gm)].map(m => m[1]).join('\n');
+      expect(code).toContain(`const dir = '${DOCKER_PATHS.promptScanDir}/artifacts/helpers';`);
+      expect(code).not.toContain('mcp__codex_security__');
+      expect(context).toContain(
+        'Do not start scans, invoke Codex Security phase skills or artifact tools,'
+      );
+    }
   });
 
   it('read only helper results named like a task, since the name goes into a shell command', () => {

@@ -18,9 +18,9 @@ import { captureOutput, mockEngine, setEngine } from './engine-mock';
 
 mockEngine();
 const { run } = await import('../cli');
-const { interactiveScan, parseMaxTime, parseTimeout, parseHostPaths, linkScanId, newRunName } =
+const { interactiveScan, parseTimeout, parseHostPaths, linkScanId, newRunName } =
   await import('../commands/scan');
-const { maxHypothesisPackets } = await import('../settings');
+const { maxHypothesisPackets, scanSwitches } = await import('../settings');
 
 /** A committed git repository, as scripts/e2e.sh makes one. */
 function fixture(): { project: string; head: string } {
@@ -40,7 +40,6 @@ function fixture(): { project: string; head: string } {
 
 /** The engine's constants every fake engine needs: the CLI keeps no copies of its own. */
 const ENGINE_CONSTANTS = {
-  REASONING_EFFORTS: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   DEFAULT_MODEL: 'deepseek/deepseek-v4.1-flash',
   BASE_URL: 'https://cynos.example/v1',
   SEVERITIES: ['critical', 'high', 'medium', 'low', 'informational'],
@@ -147,6 +146,9 @@ describe('the pretty result', () => {
     const low = stdout.indexOf('LOW           Debug endpoint left on  app/debug.py:3');
     expect(high).toBeGreaterThan(0);
     expect(low).toBeGreaterThan(high);
+    // What comes next works on either runtime: both read the run dir.
+    expect(stdout).toContain('cynos scans findings scan-0123456789');
+    expect(stdout).toContain('cynos scans export scan-0123456789 --format sarif');
   });
 
   test('reads severities in any case, skips null findings and locations, and prints no control characters', async () => {
@@ -277,6 +279,37 @@ describe('CYNOS_SCAN_MOCK=1 scan --headless --format json (the e2e contract)', (
     expect(seen.config).toBeUndefined();
   });
 
+  test('a scan runs in standard mode at xhigh effort; --mode, --effort, --model, --max-time and the cynos switches are no flags, nor is --load-apparmor', async () => {
+    const { project } = fixture();
+    const seen = fakeScan(mkdtempSync(join(tmpdir(), 'cynos-scan-state-')));
+    for (const flag of [
+      '--mode',
+      '--effort',
+      '--model',
+      '--max-time',
+      '--no-judge',
+      '--no-routing',
+      '--no-knowledge-base',
+      '--load-apparmor',
+    ]) {
+      const { value, stderr } = await captureOutput(() =>
+        run(['scan', project, flag, '--headless'], mockEnv())
+      );
+      expect(value).toBe(2);
+      expect(stderr).toContain(`unknown option '${flag}'`);
+    }
+    expect(seen.config).toBeUndefined();
+    const { value } = await captureOutput(() =>
+      run(['scan', project, '--headless', '--format', 'json'], mockEnv())
+    );
+    expect(value).toBe(0);
+    expect(seen.config).toMatchObject({
+      mode: 'standard',
+      effort: 'xhigh',
+      maxTimeHours: undefined,
+    });
+  });
+
   test('a mock scan is not a scan option: --mock is refused, and only CYNOS_SCAN_MOCK=1 asks for one', async () => {
     const { project } = fixture();
     const seen = fakeScan(mkdtempSync(join(tmpdir(), 'cynos-scan-state-')));
@@ -315,13 +348,13 @@ describe('CYNOS_SCAN_MOCK=1 scan --headless --format json (the e2e contract)', (
     expect(stdout + stderr).not.toContain(key);
   });
 
-  test('--no-knowledge-base scans with the cynos key alone; the key is never printed', async () => {
+  test('CYNOS_SCAN_NO_KNOWLEDGE_BASE=1 scans with the cynos key alone; the key is never printed', async () => {
     const { project } = fixture();
     const seen = fakeScan(mkdtempSync(join(tmpdir(), 'cynos-scan-state-')));
     const key = 'cynos-0123456789abcdef';
-    const env = { ...baseEnv(), CYNOS_API_KEY: key };
+    const env = { ...baseEnv(), CYNOS_API_KEY: key, CYNOS_SCAN_NO_KNOWLEDGE_BASE: '1' };
     const { value, stdout, stderr } = await captureOutput(() =>
-      run(['scan', project, '--no-knowledge-base', '--headless', '--format', 'json'], env)
+      run(['scan', project, '--headless', '--format', 'json'], env)
     );
     expect(value).toBe(0);
     expect(seen.config).toMatchObject({ cynosKey: key, buildKnowledgeBase: false });
@@ -346,7 +379,7 @@ describe('CYNOS_SCAN_MOCK=1 scan --headless --format json (the e2e contract)', (
 });
 
 describe('scan options for a harness: prompt addendum, cynos switches, time limit, Docker host', () => {
-  test('--scan-prompt-file, --no-judge, --no-routing, --timeout and --host-path reach the engine', async () => {
+  test('--scan-prompt-file, CYNOS_SCAN_NO_JUDGE, CYNOS_SCAN_NO_ROUTING, --timeout and --host-path reach the engine', async () => {
     const { project } = fixture();
     const seen = fakeScan(mkdtempSync(join(tmpdir(), 'cynos-scan-state-')));
     const addendum = join(mkdtempSync(join(tmpdir(), 'cynos-scan-prompt-')), 'addendum.md');
@@ -363,8 +396,6 @@ describe('scan options for a harness: prompt addendum, cynos switches, time limi
           'json',
           '--scan-prompt-file',
           addendum,
-          '--no-judge',
-          '--no-routing',
           '--timeout',
           '2h',
           '--host-path',
@@ -372,7 +403,7 @@ describe('scan options for a harness: prompt addendum, cynos switches, time limi
           '--host-path',
           '/stage=/host/stage',
         ],
-        mockEnv()
+        { ...mockEnv(), CYNOS_SCAN_NO_JUDGE: '1', CYNOS_SCAN_NO_ROUTING: '1' }
       )
     );
     expect(value).toBe(0);
@@ -457,7 +488,6 @@ describe('scan options for a harness: prompt addendum, cynos switches, time limi
       [['--scan-prompt-file', join(project, 'missing.md')], 'not a readable file'],
       [['--scan-prompt-file', empty], 'is empty'],
       [['--timeout', '0'], '--timeout takes'],
-      [['--effort', 'bogus'], 'Allowed choices are none, minimal, low, medium, high, xhigh, max'],
       [['--rubric', join(project, 'missing.md')], 'not a readable file'],
       [['--rubric', empty], 'is empty'],
       [['--false-positives', empty], 'is not JSON'],
@@ -602,17 +632,6 @@ describe('scan helpers', () => {
     expect(interactiveScan({ ...tty, format: 'jsonl' })).toBe(false);
   });
 
-  test('--max-time takes hours or a duration', () => {
-    expect(parseMaxTime('2')).toBe(2);
-    expect(parseMaxTime('90m')).toBe(1.5);
-    expect(parseMaxTime('3h')).toBe(3);
-    expect(parseMaxTime(undefined)).toBeUndefined();
-    expect(() => parseMaxTime('100h')).toThrow(/96h/);
-    expect(() => parseMaxTime('soon')).toThrow();
-    // Seconds are --timeout's alone.
-    expect(() => parseMaxTime('90s')).toThrow(/--max-time/);
-  });
-
   test('--timeout takes hours or a duration, in whole seconds, up to 96h', () => {
     expect(parseTimeout('2')).toBe(7200);
     expect(parseTimeout('90m')).toBe(5400);
@@ -633,6 +652,22 @@ describe('scan helpers', () => {
     expect(() => parseHostPaths(['/a'])).toThrow(/here=/);
     expect(() => parseHostPaths(['/a=/b=/c'])).toThrow(/here=/);
     expect(() => parseHostPaths(['relative=/b'])).toThrow(/here=/);
+  });
+
+  test('CYNOS_SCAN_NO_<SWITCH>=1 turns a switch off; another value is refused, not ignored', () => {
+    expect(scanSwitches({})).toEqual({ judge: true, routing: true, knowledgeBase: true });
+    expect(
+      scanSwitches({
+        CYNOS_SCAN_NO_JUDGE: '1',
+        CYNOS_SCAN_NO_ROUTING: '1',
+        CYNOS_SCAN_NO_KNOWLEDGE_BASE: '1',
+      })
+    ).toEqual({ judge: false, routing: false, knowledgeBase: false });
+    // Empty is unset: a workflow's optional input that was not given.
+    expect(scanSwitches({ CYNOS_SCAN_NO_JUDGE: '' })).toMatchObject({ judge: true });
+    expect(() => scanSwitches({ CYNOS_SCAN_NO_JUDGE: 'true' })).toThrow(
+      /CYNOS_SCAN_NO_JUDGE takes 1/
+    );
   });
 
   test('CYNOS_SCAN_HYPOTHESES takes a whole number of hypothesis packets, else the engine default', () => {

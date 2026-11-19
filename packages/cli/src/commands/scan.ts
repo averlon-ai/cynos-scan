@@ -7,12 +7,12 @@
  * outcome a CLI can have:
  *
  *   plan      the checkout and its HEAD, the runtime, what to scan (full, --diff REV, or
- *             --since-last-scan from upstream's history), the cynos key (a scan that calls the
+ *             --since-last-scan from the run dirs), the cynos key (a scan that calls the
  *             model needs it, its knowledge base included: checked here, before any call)
  *   run dir   <state>/averlon/scans/<run name>/, the engine's stage, private to this user
  *   scan      scanCheckout with the CLI's ScanIO: a live view or plain lines, Ctrl-C and
  *             --timeout, the local knowledge-base store
- *   link      upstream's scan id, a link to the run dir, so `scans show <id>` finds our extras
+ *   link      upstream's scan id, a link to the run dir, so `scans` commands find it by the id
  *   report    the result on stdout (pretty, or one JSON object), timings on stderr, and
  *             upstream's exit code
  */
@@ -36,7 +36,6 @@ import {
   assetsDir,
   engine,
   EngineUnavailable,
-  hasEngine,
   type KnowledgeBaseStore,
   type Runtime,
   type ScanConfig,
@@ -52,11 +51,14 @@ import {
   inCI,
   knowledgeBaseCacheDir,
   maxHypothesisPackets,
+  MOCK_STATE_DIR,
   parseRuntime,
   RUN_FILES,
   runsDir,
+  scanSwitches,
 } from '../settings';
 import type { Terminal } from '../terminal';
+import { findingRows, readFindings } from './scans';
 import { sinceLastScan, type SinceLastScanDeps } from './since-last-scan';
 
 export type ScanFormat = 'pretty' | 'json' | 'jsonl';
@@ -65,21 +67,13 @@ export interface ScanOptions {
   diff?: string;
   sinceLastScan?: boolean;
   path?: string[];
-  mode: string;
-  model?: string;
-  effort: string;
-  maxTime?: string;
   failOnSeverity: string;
   dryRun?: boolean;
-  knowledgeBase: boolean;
   runtime?: string;
   headless?: boolean;
   format: ScanFormat;
   buildImage: boolean;
-  loadApparmor?: boolean;
   scanPromptFile?: string;
-  judge: boolean;
-  routing: boolean;
   timeout?: string;
   hostPath?: string[];
   rubric?: string;
@@ -104,7 +98,7 @@ export interface ScanPlan {
   cynosKey?: string;
   model: string;
   baseUrl: string;
-  /** cynos's quality judge and task routing (--no-judge, --no-routing turn them off). */
+  /** cynos's quality judge and task routing (CYNOS_SCAN_NO_JUDGE, CYNOS_SCAN_NO_ROUTING turn them off). */
   judge: boolean;
   routing: boolean;
   /** --scan-prompt-file: the file, and its text for the end of the scan prompt. */
@@ -126,13 +120,11 @@ export interface PlannedInputs {
 }
 
 /**
- * --effort, limited to the engine's REASONING_EFFORTS: nothing downstream rejects a typo, which would
- * otherwise run a whole scan at a level nobody chose.
+ * Every scan runs in upstream's standard mode at xhigh reasoning effort: the workflow and the
+ * knowledge base are tuned for them, so the CLI offers no other.
  */
-function effortOption(): Option {
-  const option = new Option('--effort <effort>', 'reasoning effort').default('xhigh');
-  return hasEngine('REASONING_EFFORTS') ? option.choices(engine().REASONING_EFFORTS) : option;
-}
+const SCAN_MODE = 'standard';
+const SCAN_EFFORT = 'xhigh';
 
 export function registerScan(program: Command, ctx: Context): void {
   const command = program
@@ -147,26 +139,17 @@ export function registerScan(program: Command, ctx: Context): void {
       '--false-positives <file>',
       'a JSON file of findings reviewers dismissed, each with a reason; the scan drops a finding whose reason still holds'
     )
-    .addOption(
-      new Option('--mode <mode>', 'scan mode').choices(['standard', 'deep']).default('standard')
-    )
-    .option('--model <model>', 'the scan model (default: CYNOS_SCAN_MODEL or the engine default)')
-    .addOption(effortOption())
-    .option('--max-time <duration>', 'deep-scan discovery limit: hours, or 90m / 2h (max 96h)')
     .option(
       '--timeout <duration>',
       'stop the whole run after DURATION and keep what it has: hours, or 90s / 30m / 2h (max 96h)'
     )
     .option('--scan-prompt-file <file>', 'append scan instructions from FILE')
-    .option('--no-judge', "cynos's quality judge off")
-    .option('--no-routing', "cynos's task routing off")
     .addOption(
       new Option('--fail-on-severity <level>', 'exit 1 for findings at or above LEVEL')
         .choices(['none', 'critical', 'high', 'medium', 'low'])
         .default('none')
     )
     .option('--dry-run', 'validate the configuration only; no scan')
-    .option('--no-knowledge-base', "skip the knowledge base: upstream's own threat model")
     .addOption(
       new Option(
         '--runtime <runtime>',
@@ -180,7 +163,6 @@ export function registerScan(program: Command, ctx: Context): void {
         .default('pretty')
     )
     .option('--no-build-image', 'docker runtime: use the scanner image already present')
-    .option('--load-apparmor', "docker runtime on Linux: load upstream's AppArmor profile (sudo)")
     .option(
       '--host-path <here=host>',
       'docker runtime, from inside a container: the directory HERE is HOST on the Docker host (repeatable)',
@@ -195,7 +177,7 @@ export function registerScan(program: Command, ctx: Context): void {
     `${CLI_NAME} scan . --since-last-scan`,
     `${CLI_NAME} scan . --headless --format json`,
     `${CLI_NAME} scan ~/code/api --runtime docker --fail-on-severity high`,
-    `${CLI_NAME} scan . --no-knowledge-base --path src`,
+    `${CLI_NAME} scan . --path src`,
     `${CLI_NAME} scan . --rubric severity.md --false-positives dismissed.json`,
     `${CLI_NAME} scan /out/repo --runtime docker --host-path /out=/srv/arm/out --timeout 2h --headless --format json`,
   ]);
@@ -237,7 +219,7 @@ export async function scanCommand(
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   const timings = new PhaseTimings();
   const keys = [plan.cynosKey];
-  const title = `${plan.kind === 'diff' ? `diff scan since ${plan.diffBase.slice(0, 12)}` : 'full scan'} of ${plan.project} · ${plan.runtime} runtime · ${plan.model}`;
+  const title = `${plan.kind === 'diff' ? `diff scan since ${plan.diffBase.slice(0, 12)}` : 'full scan'} of ${plan.project} · ${plan.runtime} runtime`;
   const renderer = progressRenderer(terminal, timings, title, plan.interactive);
   const local = createLocalIO({
     terminal,
@@ -260,7 +242,7 @@ export async function scanCommand(
   try {
     result = await engine().scanCheckout(scanConfig(plan, options, runDir, runName), local.io);
   } catch (error) {
-    // A failed run keeps its log and timings for `logs` and `debug bundle`; a stopped one fails as
+    // A failed run keeps its log and timings for `scans logs` and `debug bundle`; a stopped one fails as
     // its stop, whichever step the stop cut short.
     writePrivate(join(runDir, RUN_FILES.timings), timings.toJSON());
     throw stopError(error, local.stoppedBy(), local.stopReason());
@@ -326,7 +308,7 @@ export async function planScan(
         `--diff ${options.diff} is HEAD itself: there are no changes to scan`
       );
   } else if (options.sinceLastScan) {
-    const since = await sinceLastScan(project, head, deps);
+    const since = sinceLastScan(project, head, engine().resolveStateDir(env), deps);
     if (since.kind === 'up-to-date') {
       notes.push(`Nothing to scan: the last completed scan (${since.scanId}) was of HEAD.`);
       upToDate = since.scanId;
@@ -347,7 +329,8 @@ export async function planScan(
       'No cynos key: a scan that calls the model needs one.',
       `Run \`${CLI_NAME} login\`, or set CYNOS_API_KEY.`
     );
-  const buildKnowledgeBase = options.knowledgeBase;
+  const switches = scanSwitches(env);
+  const buildKnowledgeBase = switches.knowledgeBase;
 
   // What surrounds the scan: its prompt's addendum, the caller's inputs, its time limit, the
   // Docker host's paths.
@@ -382,10 +365,10 @@ export async function planScan(
     verbose: ctx.terminal.verbose,
     ...(upToDate ? { upToDate } : {}),
     ...(cynos ? { cynosKey: cynos.value } : {}),
-    model: options.model || defaultModel(env),
+    model: defaultModel(env),
     baseUrl: cynosBaseUrl(env, engineBaseUrl()),
-    judge: options.judge,
-    routing: options.routing,
+    judge: switches.judge,
+    routing: switches.routing,
     ...(scanPrompt ? { scanPrompt } : {}),
     ...(timeoutSeconds ? { timeoutSeconds } : {}),
     inputs,
@@ -475,9 +458,6 @@ export function mockScan(env: NodeJS.ProcessEnv): boolean {
   return env['CYNOS_SCAN_MOCK'] === '1';
 }
 
-/** A mock scan's own upstream state dir, inside its run dir. */
-export const MOCK_STATE_DIR = 'mock-state';
-
 export function scanConfig(
   plan: ScanPlan,
   options: ScanOptions,
@@ -488,8 +468,8 @@ export function scanConfig(
   return {
     runtime: plan.runtime,
     // upstream saves a mock scan's synthetic findings in the history it is given: in the user's own,
-    // they appeared in `findings list` beside real ones and counted as a completed scan for
-    // --since-last-scan. A mock scan gets a history of its own, in its run dir, which gc removes.
+    // they appeared in upstream's `findings list` beside real ones. A mock scan gets a history of
+    // its own, in its run dir, which gc removes.
     stateDir: plan.mock ? join(runDir, MOCK_STATE_DIR) : 'upstream-default',
     interactive: plan.interactive,
     publishes: false,
@@ -505,11 +485,11 @@ export function scanConfig(
     ...(hypothesisPackets !== undefined ? { maxHypothesisPackets: hypothesisPackets } : {}),
     ...(plan.cynosKey ? { cynosKey: plan.cynosKey } : {}),
     model: plan.model,
-    effort: options.effort,
-    mode: options.mode,
+    effort: SCAN_EFFORT,
+    mode: SCAN_MODE,
     paths: options.path ?? [],
     cyberAccessProgram: '',
-    maxTimeHours: parseMaxTime(options.maxTime),
+    maxTimeHours: undefined,
     failOnSeverity: options.failOnSeverity,
     verbose: plan.verbose,
     dryRun: Boolean(options.dryRun),
@@ -518,7 +498,9 @@ export function scanConfig(
     taskRouting: plan.routing,
     baseUrl: plan.baseUrl,
     buildImage: plan.runtime === 'docker' && options.buildImage,
-    loadAppArmor: plan.runtime === 'docker' && Boolean(options.loadApparmor),
+    // The docker runtime uses upstream's AppArmor profile once `doctor --fix` has loaded it: a scan
+    // never runs sudo.
+    loadAppArmor: false,
     ...(plan.scanPrompt ? { promptAddendum: plan.scanPrompt.text } : {}),
     ...(plan.inputs.rubric ? { rubricFile: plan.inputs.rubric.file } : {}),
     ...(plan.inputs.falsePositives ? { falsePositivesFile: plan.inputs.falsePositives.file } : {}),
@@ -545,21 +527,9 @@ function durationHours(value: string, units: readonly ('h' | 'm' | 's')[]): numb
   return Number(match[1]) / { h: 1, m: 60, s: 3600 }[unit];
 }
 
-/** --max-time: hours (1.5), or 90m / 2h; upstream allows up to 96 hours. */
-export function parseMaxTime(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const hours = durationHours(value, ['h', 'm']);
-  if (!Number.isFinite(hours) || hours <= 0 || hours > 96)
-    throw new CliError(
-      'usage',
-      `--max-time takes hours (1.5) or a duration (90m, 2h) up to 96h, not ${value}`
-    );
-  return Math.round(hours * 1000) / 1000;
-}
-
 /**
- * --timeout in whole seconds: hours (2), or 90s / 30m / 2h. It has --max-time's bound, 96 hours:
- * upstream's own limit stops discovery by then, and a longer timer would overflow Node's (~24.8
+ * --timeout in whole seconds: hours (2), or 90s / 30m / 2h. Its bound is upstream's deep-scan limit, 96
+ * hours: upstream stops discovery by then, and a longer timer would overflow Node's (~24.8
  * days) and fire at once.
  */
 export function parseTimeout(value: string | undefined): number | undefined {
@@ -642,8 +612,8 @@ function resolveRevision(project: string, revision: string): string {
 }
 
 /**
- * Names the run dir by upstream's scan id, with a link beside it, so a scan's extras are found by
- * the id every history command prints.
+ * Names the run dir by upstream's scan id, with a link beside it, so a scan's run dir is found by
+ * the id `scans list` prints.
  *
  * The run dir keeps its run name: by the time the id is known, paths into it are recorded where
  * they cannot be rewritten (the result's SARIF, and the knowledge base and prompt that upstream's
@@ -657,7 +627,7 @@ export function linkScanId(runDir: string, scanId: string | null): void {
   try {
     symlinkSync(basename(runDir), link, 'dir');
   } catch {
-    // No link: `logs` and `debug bundle` take the run name instead.
+    // No link: `scans` and `debug bundle` take the run name instead.
   }
 }
 
@@ -726,95 +696,22 @@ export function resultSummary(
   };
 }
 
-/** How many findings the pretty result lists; `findings list` and the report have them all. */
+/** How many findings the pretty result lists; `scans findings` and the report have them all. */
 const LISTED_FINDINGS = 10;
 
-export interface FindingLine {
-  /** Lowercase, as the engine's severityCounts() counts it; `unrated` when there is none. */
-  severity: string;
-  title: string;
-  /** Where it happens: the sink's path:line, else the first location's. */
-  location: string;
-}
-
-type Json = Record<string, unknown>;
-const isObject = (value: unknown): value is Json =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-const list = (value: unknown): Json[] => (Array.isArray(value) ? value.filter(isObject) : []);
-
-/**
- * The findings of a completed scan, most severe first: upstream's findings.json in its scan dir.
- * A user who just ran a scan sees what it found without a second command.
- *
- * The file is upstream's and its fields are the model's, and the engine checked only each
- * finding's annotated location before it called the scan completed. So each field is read
- * defensively: a null finding or location is skipped, a severity is ranked in any case (`High`
- * counts as high, as severityCounts() counts it), and a title or path keeps no terminal control
- * characters (`ESC[2J` would clear the result being printed). A file that cannot be read lists
- * nothing: the counts and the report's path are printed anyway.
- */
-export function scanFindings(scanDir: string): FindingLine[] {
-  const findings = list(readFindings(scanDir)?.['findings']);
-  if (!findings.length) return [];
-  const severities: readonly string[] = engine().SEVERITIES;
-  const rank = (severity: string): number => {
-    const at = severities.indexOf(severity);
-    return at < 0 ? severities.length : at;
-  };
-  return findings.map(findingLine).sort((x, y) => rank(x.severity) - rank(y.severity));
-}
-
-/** upstream's findings.json, or undefined when it is missing or not a JSON object. */
-function readFindings(scanDir: string): Json | undefined {
-  try {
-    const document: unknown = JSON.parse(readFileSync(join(scanDir, 'findings.json'), 'utf8'));
-    return isObject(document) ? document : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** One finding as the result prints it, its model-written text stripped of control characters. */
-function findingLine(finding: Json): FindingLine {
-  const { plain } = engine();
-  const level = isObject(finding['severity']) ? finding['severity']['level'] : undefined;
-  const title = typeof finding['title'] === 'string' ? finding['title'] : '';
-  // The sink is where the harm happens; a finding without one is shown at its first location.
-  const locations = list(finding['locations']);
-  const at = locations.find(l => l['role'] === 'sink') ?? locations[0];
-  const path = typeof at?.['path'] === 'string' ? at['path'] : '';
-  const start = at?.['startLine'];
-  const line = typeof start === 'number' && start > 0 ? `:${start}` : '';
-  return {
-    severity: typeof level === 'string' && level ? plain(level).toLowerCase() : 'unrated',
-    title: plain(title) || '(untitled)',
-    location: path ? plain(`${path}${line}`) : '',
-  };
-}
-
-/** The pretty result's findings: the most severe LISTED_FINDINGS, then how many more. */
-function findingLines(terminal: Terminal, scanDir: string, total: number): string[] {
+/** The pretty result's findings: the most severe LISTED_FINDINGS, then where the rest are. */
+function findingLines(terminal: Terminal, scanDir: string, total: number, id: unknown): string[] {
   const c = terminal.out;
-  const findings = scanFindings(scanDir);
+  const findings = readFindings(scanDir) ?? [];
   if (!findings.length) return [];
-  const colour = (severity: string): ((text: string) => string) =>
-    severity === 'critical' || severity === 'high'
-      ? c.red
-      : severity === 'medium'
-        ? c.yellow
-        : c.dim;
-  const listed = findings
-    .slice(0, LISTED_FINDINGS)
-    .map(
-      f =>
-        `  ${colour(f.severity)(f.severity.toUpperCase().padEnd(13))} ${f.title}${f.location ? `  ${c.dim(f.location)}` : ''}`
-    );
+  const listed = findingRows(c, findings.slice(0, LISTED_FINDINGS));
   const more = Math.max(total, findings.length) - listed.length;
+  const all = id ? `${CLI_NAME} scans findings ${String(id)}` : 'the report';
   return [
     '',
     c.dim('Findings:'),
     ...listed,
-    ...(more > 0 ? [c.dim(`  … and ${more} more: ${CLI_NAME} findings list, or the report`)] : []),
+    ...(more > 0 ? [c.dim(`  … and ${more} more: ${all}`)] : []),
   ];
 }
 
@@ -846,19 +743,20 @@ function printResult(terminal: Terminal, summary: Record<string, unknown>): void
   if (summary['policyStatus'] === 'failed') row('policy', `failed: ${String(summary['reason'])}`);
   row('extras', summary['runDir']);
   const id = summary['scanId'];
-  if (status === 'completed' && scanDir) lines.push(...findingLines(terminal, scanDir, total));
+  if (status === 'completed' && scanDir) lines.push(...findingLines(terminal, scanDir, total, id));
   if (id && status === 'completed')
     lines.push(
       '',
       c.dim('Next:'),
-      `  ${CLI_NAME} scans show ${String(id)}`,
-      `  ${CLI_NAME} findings list`,
-      `  ${CLI_NAME} export --scan ${String(id)} --export-format sarif --output results.sarif`
+      `  ${CLI_NAME} scans findings ${String(id)}`,
+      `  ${CLI_NAME} scans export ${String(id)} --format sarif --output results.sarif`
     );
   else if (status === 'failed')
     lines.push(
       '',
-      c.dim(`Debug it: ${CLI_NAME} logs${id ? ` ${String(id)}` : ''} · ${CLI_NAME} debug bundle`)
+      c.dim(
+        `Debug it: ${CLI_NAME} scans logs${id ? ` ${String(id)}` : ''} · ${CLI_NAME} debug bundle${id ? ` ${String(id)}` : ''}`
+      )
     );
   terminal.result(lines.join('\n'));
 }

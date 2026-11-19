@@ -6,8 +6,8 @@
  *   stale run dirs   <state>/averlon/scans/<run name>/ that no scan id links to: a scan that
  *                    failed or was stopped before upstream registered it, older than a day; and
  *                    scan-id links whose run dir is gone
- *   cache snapshots  <state>/averlon/knowledge-base-cache/v1/<sha>/ beyond the newest N or the
- *                    size limit, oldest first, and half-written .pending-* dirs
+ *   cache snapshots  <state>/averlon/knowledge-base-cache/v1/<sha>/ beyond the newest N or 2 GiB,
+ *                    oldest first, and half-written .pending-* dirs
  *   containers       exited docker containers named cynos-scan-*
  *
  * upstream's own history and scan dirs are never touched: they are upstream's to manage. gc lists
@@ -28,7 +28,6 @@ interface GcOptions {
   dryRun?: boolean;
   yes?: boolean;
   keepSnapshots: string;
-  maxCacheSize: string;
 }
 
 export interface Garbage {
@@ -40,6 +39,9 @@ export interface Garbage {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** The knowledge-base cache's size limit: snapshots beyond it go, oldest first. */
+const MAX_CACHE_BYTES = 2 * 1024 ** 3;
+
 export function registerGc(program: Command, ctx: Context): void {
   const command = program
     .command('gc')
@@ -47,14 +49,13 @@ export function registerGc(program: Command, ctx: Context): void {
     .option('--dry-run', 'only list what would be removed')
     .option('--yes', 'remove without asking')
     .option('--keep-snapshots <n>', 'knowledge-base snapshots to keep', '20')
-    .option('--max-cache-size <size>', 'knowledge-base cache limit (e.g. 500M, 2G)', '2G')
     .action(async (options: GcOptions) => {
       process.exitCode = await gcCommand(ctx, options);
     });
   withExamples(command, [
     `${CLI_NAME} gc --dry-run`,
     `${CLI_NAME} gc --yes`,
-    `${CLI_NAME} gc --keep-snapshots 5 --max-cache-size 500M`,
+    `${CLI_NAME} gc --keep-snapshots 5`,
   ]);
 }
 
@@ -68,11 +69,7 @@ async function gcCommand(ctx: Context, options: GcOptions): Promise<number> {
   // 1. Everything that qualifies.
   const garbage = [
     ...staleRunDirs(runsDir(stateDir)),
-    ...surplusSnapshots(
-      join(knowledgeBaseCacheDir(stateDir), 'v1'),
-      keep,
-      parseSize(options.maxCacheSize)
-    ),
+    ...surplusSnapshots(join(knowledgeBaseCacheDir(stateDir), 'v1'), keep, MAX_CACHE_BYTES),
     ...exitedContainers(),
   ];
   if (!garbage.length) {
@@ -101,16 +98,6 @@ async function gcCommand(ctx: Context, options: GcOptions): Promise<number> {
   }
   terminal.info(`${terminal.c.green('✓')} Removed ${garbage.length} item(s).`);
   return EXIT.ok;
-}
-
-/** 500M, 2G, 1024K or bytes. */
-export function parseSize(value: string): number {
-  const match = /^(\d+(?:\.\d+)?)\s*([KMG]?)B?$/i.exec(value.trim());
-  if (!match) throw new CliError('usage', `a size is a number with K, M or G (not ${value})`);
-  const unit = { '': 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[
-    match[2]!.toUpperCase() as '' | 'K' | 'M' | 'G'
-  ];
-  return Number(match[1]) * unit;
 }
 
 function sizeOf(path: string): number {

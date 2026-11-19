@@ -10,7 +10,7 @@ are examples):
 ```js
 {
   ruleId: "sql-injection-login-query", title: "SQL injection in login", summary: "...",
-  identity: { anchor: "app/routes/login.py", instance: "login-query" },
+  identity: { anchor: "login-query-construction" },
   severity: { level: "high", rationale: "..." },          // critical|high|medium|low|informational
   confidence: { level: "high", rationale: "..." },        // high|medium|low
   taxonomy: { category: "injection", cwe: ["CWE-89"] },
@@ -28,5 +28,12 @@ are examples):
 }
 ```
 
+`identity.anchor` names the root control the finding breaks (upstream's "semantic root-control
+anchor"), never a file path or a code identifier: a lowercase slug of `a-z`, `0-9`, `.`, `_`, `/`
+and `-` that starts with a letter or digit, so `password-reset-token-check`, not
+`.github/workflows/ci.yml` or `UpdateProviderKey`. The paths go in `locations` and `codeEvidence`.
+Give `identity.instance`, the same kind of slug, only to tell apart sibling findings that share a
+`ruleId` and anchor.
+
 Do not add `findingId`, `occurrenceId` or `fingerprints`, and never try to compute them: the
-workbench derives them from each finding's `ruleId` and `identity.anchor`.
+workbench derives them from each finding's `ruleId` and `identity`.

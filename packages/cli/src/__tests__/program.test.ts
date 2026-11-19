@@ -21,14 +21,9 @@ const program = () => buildProgram(createContext(env()));
 const EXPECTED = [
   'scan',
   'scans list',
-  'scans show',
+  'scans findings',
+  'scans export',
   'scans logs',
-  'scans compare',
-  'scans rerun',
-  'findings list',
-  'findings false-positive',
-  'export',
-  'logs',
   'login',
   'logout',
   'auth status',
@@ -99,14 +94,7 @@ describe('--llms', () => {
     for (const command of manifest.commands) expect(command.examples.length).toBeGreaterThan(0);
     expect(Object.keys(manifest.exitCodes)).toEqual(['0', '1', '2', '130', '143']);
     const scan = manifest.commands.find(command => command.name === 'scan')!;
-    for (const option of [
-      '--since-last-scan',
-      '--scan-prompt-file',
-      '--no-judge',
-      '--no-routing',
-      '--timeout',
-      '--host-path',
-    ])
+    for (const option of ['--since-last-scan', '--scan-prompt-file', '--timeout', '--host-path'])
       expect(JSON.stringify(scan.options)).toContain(option);
   });
 

@@ -4,7 +4,7 @@
  * A scan reports through log lines and progress events, and on a laptop they have three readers
  * with different needs: the person at the terminal (the renderer: a live view or plain lines),
  * a script reading stdout (--format jsonl: one event per line), and whoever debugs the run later
- * (the run dir's cli.log and events.jsonl, which `logs` and `debug bundle` read). Every line is
+ * (the run dir's cli.log and events.jsonl, which `scans logs` and `debug bundle` read). Every line is
  * redacted with the run's keys before any of them sees it.
  *
  * It also owns how the scan is stopped. A run stops for one of three reasons: Ctrl-C, SIGTERM, or
