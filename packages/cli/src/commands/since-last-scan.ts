@@ -1,19 +1,22 @@
 /**
  * --since-last-scan: scan only what changed since this repository's last completed scan.
  *
- * The revision to diff from is in upstream's history, not ours: `scans list <repo> --json` lists
- * this repository's scans, each with its status and the revision it scanned
- * (`{ scans: [{ scanId, targetRevision, progress: { status }, completedAt }] }`). A diff is only
- * meaningful when that revision is an ancestor of HEAD; after a rebase or a branch switch it is
- * not, and a diff from it would rescan unrelated changes or fail upstream's target checks. So:
+ * The revision to diff from is in the run dirs (`scans list`), not upstream's history: a docker
+ * scan is recorded only in its own run dir, so upstream's history never saw it. Each run dir's
+ * result names the repository it scanned, its status and the revision (`project`, `scanStatus`,
+ * `scannedSha`). A diff is only meaningful when that revision is an ancestor of HEAD; after a
+ * rebase or a branch switch it is not, and a diff from it would rescan unrelated changes or fail
+ * upstream's target checks. So:
  *
- *   newest completed scan with a revision   none     → full scan, saying so
- *   its revision is HEAD                     yes      → nothing to scan
- *   its revision is an ancestor of HEAD      yes      → diff from it
- *   otherwise                                         → full scan, saying why
+ *   newest completed scan of this repository with a revision   none  → full scan, saying so
+ *   its revision is HEAD                                        yes   → nothing to scan
+ *   its revision is an ancestor of HEAD                         yes   → diff from it
+ *   otherwise                                                         → full scan, saying why
+ *
+ * A mock scan's findings are synthetic, so it never counts as the last scan.
  */
 import { spawnSync } from 'node:child_process';
-import { captureUpstream, upstreamJson, type UpstreamCapture } from '../upstream';
+import { listRuns, type ScanRun } from './scans';
 
 export type SinceLastScan =
   | { kind: 'diff'; base: string; scanId: string }
@@ -23,11 +26,9 @@ export type SinceLastScan =
 export interface LastScan {
   scanId: string;
   revision: string;
-  completedAt: string;
 }
 
 export interface SinceLastScanDeps {
-  capture?: UpstreamCapture;
   isAncestor?: (project: string, revision: string, head: string) => boolean;
 }
 
@@ -40,42 +41,32 @@ export function gitIsAncestor(project: string, revision: string, head: string): 
   );
 }
 
-/** The newest completed scan in upstream's `scans list --json` output that recorded a revision. */
-export function lastCompletedScan(list: unknown): LastScan | undefined {
-  const scans = (list as { scans?: unknown })?.scans;
-  if (!Array.isArray(scans)) return undefined;
-  const completed: LastScan[] = [];
-  for (const scan of scans as Record<string, unknown>[]) {
-    const status = (scan?.['progress'] as Record<string, unknown> | undefined)?.['status'];
-    const revision = scan?.['targetRevision'];
-    if (status !== 'complete' || typeof revision !== 'string' || !revision) continue;
-    completed.push({
-      scanId: String(scan['scanId']),
-      revision,
-      completedAt: String(scan['completedAt'] ?? scan['updatedAt'] ?? ''),
-    });
+/** The newest completed, real scan of project that recorded a revision (runs come newest first). */
+export function lastCompletedScan(runs: ScanRun[], project: string): LastScan | undefined {
+  for (const run of runs) {
+    const result = run.result;
+    const revision = result?.['scannedSha'];
+    if (run.mock || result?.['project'] !== project || result['scanStatus'] !== 'completed')
+      continue;
+    if (typeof revision === 'string' && revision) return { scanId: run.id, revision };
   }
-  return completed.sort((a, b) => b.completedAt.localeCompare(a.completedAt))[0];
+  return undefined;
 }
 
-export async function sinceLastScan(
+export function sinceLastScan(
   project: string,
   head: string,
+  stateDir: string,
   deps: SinceLastScanDeps = {}
-): Promise<SinceLastScan> {
+): SinceLastScan {
   const isAncestor = deps.isAncestor ?? gitIsAncestor;
 
-  // 1. This repository's history, from upstream.
-  const listed = await upstreamJson(['scans', 'list', project], deps.capture ?? captureUpstream);
-  if (listed.error !== undefined)
-    return { kind: 'full', reason: `upstream's scan history could not be read (${listed.error})` };
-
-  // 2. The newest completed scan that recorded what it scanned.
-  const last = lastCompletedScan(listed.value);
+  // 1. The newest completed scan of this repository that recorded what it scanned.
+  const last = lastCompletedScan(listRuns(stateDir), project);
   if (!last) return { kind: 'full', reason: 'this repository has no completed scan yet' };
   if (last.revision === head) return { kind: 'up-to-date', scanId: last.scanId };
 
-  // 3. Its revision must be in HEAD's history for a diff from it to mean "since then".
+  // 2. Its revision must be in HEAD's history for a diff from it to mean "since then".
   if (!isAncestor(project, last.revision, head))
     return {
       kind: 'full',

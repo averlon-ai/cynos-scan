@@ -55,16 +55,18 @@ describe('the debug bundle scrub', () => {
     expect(filesWithKeys(dir, [CYNOS])).toContain(join(dir, `note-${CYNOS}.txt`));
   });
 
-  test('leaves out credentials, databases, compressed logs, and transcripts without the flag', () => {
-    expect(leaveOut('state/home/auth.json', true)).toBe('credentials');
-    expect(leaveOut('workbench.sqlite3', true)).toBe('database');
-    expect(leaveOut('state/sessions/2026/rollout-1.jsonl.zst', true)).toContain('compressed');
-    expect(leaveOut('state/sessions/2026/rollout-1.jsonl', false)).toContain(
-      '--include-transcripts'
-    );
-    expect(leaveOut('state/sessions/2026/rollout-1.jsonl', true)).toBeUndefined();
-    expect(leaveOut('cli.log', false)).toBeUndefined();
-    expect(leaveOut('run.json', false)).toBeUndefined();
+  test('leaves out credentials, databases, compressed logs and transcripts', () => {
+    expect(leaveOut('state/home/auth.json')).toBe('credentials');
+    expect(leaveOut('state/workbench.sqlite3')).toBe('database');
+    expect(leaveOut('state/sessions/2026/rollout-1.jsonl.zst')).toContain('compressed');
+    expect(leaveOut('state/sessions/2026/rollout-1.jsonl')).toContain('transcript');
+    // The architecture agent's Codex events quote the source its commands printed.
+    expect(leaveOut('knowledge-base/review/events.jsonl')).toContain('transcript');
+    // The CLI's own progress events stay.
+    expect(leaveOut('events.jsonl')).toBeUndefined();
+    expect(leaveOut('cli.log')).toBeUndefined();
+    expect(leaveOut('run.json')).toBeUndefined();
+    expect(leaveOut('reports/findings.json')).toBeUndefined();
   });
 
   test("known keys: the environment's and the saved login's", () => {

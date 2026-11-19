@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'bun:test';
 import {
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -128,6 +129,8 @@ describe('validateReports', () => {
   it('says when the findings are not JSON', () => {
     writeFileSync(join(scanDir, 'findings.json'), '{not json');
     expect(validateReports(stage).findingsProblem).toBe('findings.json is not valid JSON');
+    // reports/ holds only validated reports: `cynos scans` exports what is there.
+    expect(existsSync(join(stage, 'reports', 'findings.json'))).toBe(false);
   });
 
   it('refuses findings with unsafe locations', () => {
@@ -139,6 +142,7 @@ describe('validateReports', () => {
     expect(reports.findings).toBeUndefined();
     expect(reports.findingsProblem).toContain('unsafe source location');
     expect(reports.paths['findings.json']).toBeUndefined();
+    expect(existsSync(join(stage, 'reports', 'findings.json'))).toBe(false);
   });
 });
 

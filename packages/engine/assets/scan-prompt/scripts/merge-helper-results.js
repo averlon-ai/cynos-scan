@@ -52,6 +52,38 @@ for (const f of all) {
   ];
   merged[i] = keep;
 }
+// Identities: the draft tool takes an anchor or instance only as a lowercase slug
+// (^[a-z0-9][a-z0-9._/-]*$) and rejects the whole draft for one that is not, while helpers write
+// file paths such as .github/workflows/ci.yml and code names such as UpdateProviderKey. So each
+// becomes the slug upstream's workbench makes of a name (retained_records.py,
+// _semantic_identifier): accents dropped, lowercased, every other run of characters a "-", no
+// leading non-alphanumerics or trailing "-". A finding whose rule, anchor and instance an earlier
+// one has, which the workbench refuses, gets the workbench's own split: its instance with -2, -3,
+// ..., taking no other finding's identity.
+const slug = (value, fallback) =>
+  String(value)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, '-')
+    .replace(/^[^a-z0-9]+|-+$/g, '') || fallback;
+merged.forEach((f, i) => {
+  for (const field of ['anchor', 'instance'])
+    if (f.identity?.[field] !== undefined)
+      f.identity[field] = slug(f.identity[field], `finding-${i + 1}`);
+});
+const identified = merged.filter(f => f.identity);
+const identity = f => JSON.stringify([f.ruleId, f.identity.anchor, f.identity.instance]);
+const taken = new Set(identified.map(identity)),
+  used = new Set();
+for (const f of identified) {
+  if (used.has(identity(f))) {
+    const base = f.identity.instance ?? 'saved';
+    for (let n = 2; taken.has(identity(f)); n++) f.identity.instance = `${base}-${n}`;
+    taken.add(identity(f));
+  }
+  used.add(identity(f));
+}
 store('merged', merged);
 store('reviewed', [...reviewed]);
 store('questions', questions);

@@ -579,7 +579,7 @@ async function preflight(
       const { failure, fix } = keyCheckFailure(answer, config.model, config.baseUrl);
       throw new Error(`${failure}. ${fix}`);
     }
-    say(io, 'preflight', 'key', `cynos accepted the key for ${config.model} (${answer.answer}).`);
+    say(io, 'preflight', 'key', `cynos accepted the key (${answer.answer}).`);
   }
 }
 

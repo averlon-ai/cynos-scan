@@ -64,15 +64,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # A published tag is never moved: npm users of that version may already pin its digest.
-      # Any failure to read it means it does not exist (the package may not exist yet either).
+      # Only an explicit missing manifest permits publication; registry failures stop it.
       - name: Refuse a version whose image exists
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if docker buildx imagetools inspect "$IMAGE:v$VERSION" > /dev/null 2>&1; then
-            echo "::error::$IMAGE:v$VERSION already exists; bump the packages' version"
-            exit 1
-          fi
+        run: bash scripts/assert-image-tag-absent.sh "$IMAGE:v$VERSION"
 
   image:
     name: Scanner image (${{ matrix.arch }})
@@ -240,7 +236,7 @@ jobs:
         with:
           name: npm-packages-${{ github.run_attempt }}
           path: dist
-      # The engine must pin exactly the image this run published (assets/image.json).
+      # Both packages must pin exactly the image this run published.
       - name: Verify the tarballs
         working-directory: dist
         env:
@@ -260,10 +256,12 @@ jobs:
               throw new Error('Unexpected package identity or registry');
             }
             versions.add(pkg.version);
-            if (pkg.name === '@averlon-ai/cynos-scan-engine') {
-              const pinned = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/assets/image.json'], { encoding: 'utf8' }));
+            {
+              const pinPath = pkg.name === '@averlon-ai/cynos-scan-engine'
+                ? 'package/assets/image.json' : 'package/dist/assets/image.json';
+              const pinned = JSON.parse(execFileSync('tar', ['-xOzf', file, pinPath], { encoding: 'utf8' }));
               if (`${pinned.image}@${pinned.digest}` !== process.env.SCANNER_IMAGE) {
-                throw new Error(`The engine pins ${pinned.image}@${pinned.digest}, not ${process.env.SCANNER_IMAGE}`);
+                throw new Error(`${pkg.name} pins ${pinned.image}@${pinned.digest}, not ${process.env.SCANNER_IMAGE}`);
               }
             }
           }

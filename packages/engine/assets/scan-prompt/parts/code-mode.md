@@ -13,7 +13,8 @@ and context checkpoints, and `load(key)` returns it.
   every `exec` that prints source, a document or a long list with that header.
 - **Scan tools.** The codex-security tools are functions too:
   `tools.mcp__codex_security__<tool name>(...)`, for example
-  `text(JSON.stringify(await tools.mcp__codex_security__save_codex_security_artifact({...})))`.
+  `text(JSON.stringify(await tools.mcp__codex_security__record_codex_security_scan_draft({...})))`.
+  They serve only the scan's owner, the lead's thread, and refuse a helper.
 - **Environment.** The JavaScript has no `process` or `process.env`. Use environment variables
   inside the shell commands you pass to `tools.exec_command` (for example
   `cat "$CODEX_SECURITY_PLUGIN_ROOT/references/scan-runtime.md"`), never by echoing them into

@@ -757,7 +757,7 @@ export class DockerRuntime implements ScanRuntime {
         `${foreignImage(this.image, platform, host)} Run \`cynos doctor --runtime docker --fix\`.`
       );
     // A profile already loaded (doctor --fix, or the host's setup) is used without sudo;
-    // --load-apparmor loads it first.
+    // loadAppArmor (the benchmarks' --apparmor) loads it first.
     this.apparmor = options.loadAppArmor
       ? loadAppArmor(this.assets)
       : dockerUsesAppArmor() && appArmorProfileLoaded(this.image);

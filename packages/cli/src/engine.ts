@@ -11,7 +11,7 @@
  *   hasEngine('checkHost')        whether this engine build has it, for checks that degrade
  *
  * The types below are the contract the CLI codes against (scanCheckout, checkHost, fixHost,
- * resolveStateDir, resolveUpstream, upstreamCommand, LocalKnowledgeBaseStore, checkKey,
+ * resolveStateDir, resolveUpstream, LocalKnowledgeBaseStore, checkKey,
  * keyCheckFailure, killContainer, plain and the constants). They mirror the engine's own; once the
  * engine's index.ts exports all of them, the local copies can become re-exports. Tests mock this
  * module rather than the engine.
@@ -84,7 +84,7 @@ export interface ScanConfig {
   scannedSha: string;
   /** A diff's repository-relative threat-model file, or empty. */
   knowledgeBase: string;
-  /** false for --no-knowledge-base: a full scan on upstream's own threat model. */
+  /** false for CYNOS_SCAN_NO_KNOWLEDGE_BASE: a full scan on upstream's own threat model. */
   buildKnowledgeBase: boolean;
   /** CYNOS_SCAN_HYPOTHESES: the most hypothesis packets; unset for the engine's default. */
   maxHypothesisPackets?: number;
@@ -201,7 +201,6 @@ export interface Engine {
   FIXABLE_CHECKS: readonly string[];
   resolveStateDir(env: NodeJS.ProcessEnv): string;
   resolveUpstream(): UpstreamInstall;
-  upstreamCommand(args: string[]): string[];
   LocalKnowledgeBaseStore: new (
     root: string,
     log?: (message: string) => void
@@ -218,7 +217,6 @@ export interface Engine {
   /** External text (model output, upstream's files) without control or bidi-override characters. */
   plain(value: string, limit?: number): string;
   DEFAULT_MODEL: string;
-  REASONING_EFFORTS: readonly string[];
   /** Most severe first. */
   SEVERITIES: readonly string[];
   BASE_URL: string;

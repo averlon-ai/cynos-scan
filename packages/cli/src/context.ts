@@ -42,8 +42,10 @@ export function createContext(env: NodeJS.ProcessEnv = process.env): Context {
 }
 
 /**
- * The engine's default model, unless CYNOS_SCAN_MODEL names another. The engine's DEFAULT_MODEL is
- * the only copy: a second one here drifted from it before.
+ * The scan model: the engine's default, unless CYNOS_SCAN_MODEL names another. CYNOS_SCAN_MODEL is
+ * undocumented on purpose (not in ENVIRONMENT, no flag): a scan's workflow is tuned for the default,
+ * and another model is for benchmarks. The engine's DEFAULT_MODEL is the only copy: a second one
+ * here drifted from it before.
  */
 export function defaultModel(env: NodeJS.ProcessEnv): string {
   return env['CYNOS_SCAN_MODEL'] || engine().DEFAULT_MODEL;

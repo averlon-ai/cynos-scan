@@ -11,7 +11,14 @@
 #
 #   - the scan completes, with a knowledge base built;
 #   - it finds DSVW's SQL injection in dsvw.py (CWE-89). DSVW has six, in plain string
-#     concatenation, so a scan that misses all of them is broken, not unlucky.
+#     concatenation, so a scan that misses all of them is broken, not unlucky;
+#   - every command that reads a finished scan works on it (check-scans.sh): `scans list`,
+#     `scans findings`, `scans export` in each format, `scans logs`, and `debug bundle`, which
+#     must not hold the key;
+#   - Codex, reading its agents' traces, sees no pattern of tool calls failing because of the
+#     workflow (check-scan-traces.mjs): a scan tool refusing calls, or a script, path or command
+#     the workflow gives failing. A scan recovers from those at a few retry turns each, so its
+#     outcome never shows them.
 #
 # It runs this checkout's build, or CYNOS_BIN (an installed cynos). The key is read by cynos from
 # CYNOS_API_KEY, never passed in argv; CYNOS_BASE_URL names another cynos gateway than the
@@ -43,9 +50,8 @@ if [ "$runtime" = docker ]; then
 fi
 
 echo "== real scan of DSVW ($runtime)"
-# Judge and routing off: every turn on the requested model, and the judge's cost saved.
-"${cli[@]}" scan "$fixture" --runtime "$runtime" --headless --format json --no-judge --no-routing \
-  --timeout 45m > "$work/scan.json" || true
+# A scan as a user runs it: cynos's quality judge and task routing on, as they are by default.
+"${cli[@]}" scan "$fixture" --runtime "$runtime" --headless --format json --timeout 45m > "$work/scan.json" || true
 
 node - "$work/scan.json" <<'JS'
 const { readFileSync } = require('node:fs');
@@ -75,5 +81,18 @@ for (const finding of findings)
   console.log(`  ${finding.severity?.level ?? '?'}: ${finding.title} [${(finding.taxonomy?.cwe ?? []).join(', ')}]`);
 if (!sqlInjection) fail("no CWE-89 finding in dsvw.py: DSVW's SQL injection was missed");
 JS
+
+# Every command that reads a finished scan, on the scan just run (check-scans.sh).
+scan_id="$(node -p 'require(process.argv[1]).scanId' "$work/scan.json")"
+bash "$root/scripts/check-scans.sh" "$work" "$scan_id" "$runtime" real
+
+echo "== the scan's agent traces"
+# Codex reads the traces: the scan's own Codex, from the cynos install that ran it.
+if [ -n "${CYNOS_BIN:-}" ]; then
+  cynos="$(node -e 'console.log(require("node:path").dirname(require("node:fs").realpathSync(process.argv[1])))' "$CYNOS_BIN")"
+else
+  cynos="$root/packages/cli"
+fi
+node "$root/scripts/check-scan-traces.mjs" "$work" --report "$work/traces" --cynos "$cynos"
 
 echo "e2e real ($runtime) passed; evidence in $work"

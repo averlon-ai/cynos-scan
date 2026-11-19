@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End to end on this machine, for one runtime: doctor, then upstream's synthetic scan of a fixture
-# repository (no key, no model call), then the scan in its own upstream history and not in the
-# repository's. The CLI runs a mock scan only when CYNOS_SCAN_MOCK=1 asks for it: it is not a
-# scan option, because its findings are synthetic.
+# repository (no key, no model call), then every command that reads a finished scan, on it
+# (check-scans.sh). The CLI runs a mock scan only when CYNOS_SCAN_MOCK=1 asks for it: it is
+# not a scan option, because its findings are synthetic.
 #
 #   bash scripts/e2e.sh native|docker
 #
@@ -58,19 +58,8 @@ node -e '
   console.log(`scan ${result.scanId}: ${result.scanStatus}`);
 ' "$work/scan.json"
 
-if [ "$runtime" = native ]; then
-  # A mock scan keeps its own history in its run dir, so its synthetic findings never reach the
-  # repository's real one: it is listed there, and not in the state dir every other scan uses.
-  scan_id="$(node -p 'require(process.argv[1]).scanId' "$work/scan.json")"
-  mock_state="$(node -p 'require(process.argv[1]).runDir' "$work/scan.json")/mock-state"
-  echo "== scans list (the mock scan's own history)"
-  CODEX_SECURITY_STATE_DIR="$mock_state" "${cli[@]}" scans list "$fixture" --format json > "$work/scans.json"
-  grep -q "$scan_id" "$work/scans.json"
-  echo "== scans list (the repository's history: no mock scan)"
-  if "${cli[@]}" scans list "$fixture" --format json 2> /dev/null | grep -q "$scan_id"; then
-    echo "the mock scan $scan_id is in the repository's scan history" >&2
-    exit 1
-  fi
-fi
+# Every command that reads a finished scan, on the scan just run (check-scans.sh).
+scan_id="$(node -p 'require(process.argv[1]).scanId' "$work/scan.json")"
+bash "$root/scripts/check-scans.sh" "$work" "$scan_id" "$runtime" mock
 
 echo "e2e ($runtime) passed; evidence in $work"

@@ -102,7 +102,7 @@ export function keyCheckFailure(
     case 'model':
       return {
         failure: `cynos cannot serve the model ${model} for this key (${check.answer})`,
-        fix: 'Choose a model the key may use: --model, or CYNOS_SCAN_MODEL.',
+        fix: 'Choose a model the key may use, or ask for this one on the key.',
       };
     case 'unreachable':
       return {

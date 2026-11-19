@@ -24,6 +24,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -201,7 +202,9 @@ export function validateReports(
     } catch (error) {
       reports.findingsProblem =
         error instanceof SyntaxError ? 'findings.json is not valid JSON' : (error as Error).message;
-      // Rejected findings are not published, not even in the report artifact.
+      // Rejected findings are not published, not even in the report artifact, and the run dir's
+      // reports/ holds only validated reports: `cynos scans` reads and exports what is there.
+      rmSync(reports.paths['findings.json'], { force: true });
       delete reports.paths['findings.json'];
     }
   }

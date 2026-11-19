@@ -2,7 +2,7 @@
  * The command tree, grouped by task in the root help as upstream's is:
  *
  *   Scan                 scan
- *   Review results       scans, findings, export, logs
+ *   Review results       scans (list, findings, export, logs)
  *   Sign in              login, logout, auth
  *   Setup and support    doctor, update, info, debug, gc
  *   Shell and help       completion, help
@@ -19,11 +19,11 @@ import { registerDebug } from './commands/debug-bundle';
 import { registerDoctor } from './commands/doctor';
 import { registerGc } from './commands/gc';
 import { registerHelpTopics, TOPICS } from './commands/help-topics';
-import { registerHistory } from './commands/history';
 import { registerInfo } from './commands/info';
 import { registerScan } from './commands/scan';
+import { registerScans } from './commands/scans';
 import { registerUpdate } from './commands/update';
-import { allCommands, examplesOf, GET_STARTED, upstreamOf } from './help';
+import { allCommands, examplesOf, GET_STARTED } from './help';
 import { ENVIRONMENT } from './settings';
 
 export const DESCRIPTION =
@@ -56,7 +56,7 @@ export function buildProgram(ctx: Context): Command {
   program.commandsGroup('Scan:');
   registerScan(program, ctx);
   program.commandsGroup('Review results:');
-  registerHistory(program, ctx);
+  registerScans(program, ctx);
   program.commandsGroup('Sign in:');
   registerAuth(program, ctx);
   program.commandsGroup('Setup and support:');
@@ -102,7 +102,7 @@ export function commandManifest(program: Command): Record<string, unknown> {
     description: DESCRIPTION,
     usage: `${CLI_NAME} <command> [options]`,
     output:
-      'Results go to stdout, progress and diagnostics to stderr. scan --format json prints one JSON object.',
+      'Results go to stdout, progress and diagnostics to stderr. scan --format json prints one JSON object, --format jsonl one event per line.',
     globalOptions: optionsOf(program),
     commands: allCommands(program).map(({ name, command }) => ({
       name,
@@ -117,7 +117,6 @@ export function commandManifest(program: Command): Record<string, unknown> {
       options: optionsOf(command),
       subcommands: command.commands.map(child => child.name()),
       examples: examplesOf(command),
-      ...(upstreamOf(command) ? { passesThroughTo: upstreamOf(command) } : {}),
     })),
     exitCodes: {
       0: 'completed, or passes the severity policy',

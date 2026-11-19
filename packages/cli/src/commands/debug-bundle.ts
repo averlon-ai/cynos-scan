@@ -1,15 +1,14 @@
 /**
  * `cynos debug bundle [ID]`: one tarball with what it takes to debug a scan, safe to share.
  *
- * A scan's evidence is spread over upstream's history (the scan's record), our run dir (the
- * engine's run.json, the CLI's log, events and timings, the knowledge base), and this machine
+ * A scan's evidence is its run dir, on either runtime (the result, the engine's run.json and
+ * validated reports, the CLI's log, events and timings, the knowledge base), and this machine
  * (versions, doctor). The difficulty is that the same files can hold the keys the scan ran with:
  * Codex's state, session transcripts, an error message that echoed a header. So the bundle is
  * built in a private staging dir and checked before anything leaves it:
  *
- *   collect  upstream's `scans show <id> --json`, the run dir, versions, `doctor --json`;
- *            never auth files, databases or compressed logs (they cannot be scrubbed);
- *            session transcripts only with --include-transcripts
+ *   collect  the run dir, versions, `doctor --json`; never auth files, databases, compressed
+ *            logs (they cannot be scrubbed) or session transcripts (they hold source code)
  *   scrub    every known key value (the environment's, every saved login's) replaced with ***
  *   verify   any key still present (in a name, or bytes the scrub could not reach) refuses
  *   confirm  every file listed, then a yes (or --yes) before the tarball is written
@@ -38,12 +37,10 @@ import { CliError, EXIT } from '../exit-codes';
 import { withExamples } from '../help';
 import { confirm } from '../prompts';
 import { defaultRuntime } from '../settings';
-import { upstreamJson } from '../upstream';
 import { collectChecks } from './doctor';
-import { findRunDir, latestRunDir } from './history';
+import { findRunDir, latestRunDir } from './scans';
 
 interface BundleOptions {
-  includeTranscripts?: boolean;
   output?: string;
   yes?: boolean;
 }
@@ -53,11 +50,8 @@ export function registerDebug(program: Command, ctx: Context): void {
   withExamples(debug, [`${CLI_NAME} debug bundle`]);
   const bundle = debug
     .command('bundle')
-    .description(
-      'Write a tarball for a scan: its record, our extras, versions, doctor; keys scrubbed.'
-    )
-    .argument('[id]', 'scan id, unique prefix or run name (default: the latest)')
-    .option('--include-transcripts', 'also include session transcripts (may hold your source code)')
+    .description('Write a tarball for a scan: its run dir, versions, doctor; keys scrubbed.')
+    .argument('[id]', 'scan id, unique prefix or run name (default: the newest run)')
     .option('--output <file>', 'where to write it (default: ./cynos-debug-<id>-<date>.tar.gz)')
     .option('--yes', 'write it without asking')
     .action(async (id: string | undefined, options: BundleOptions) => {
@@ -66,7 +60,7 @@ export function registerDebug(program: Command, ctx: Context): void {
   withExamples(bundle, [
     `${CLI_NAME} debug bundle`,
     `${CLI_NAME} debug bundle 1a2b3c4d --output /tmp/scan-debug.tar.gz`,
-    `${CLI_NAME} debug bundle --include-transcripts --yes`,
+    `${CLI_NAME} debug bundle --yes`,
   ]);
 }
 
@@ -78,20 +72,21 @@ async function debugBundle(
   const { terminal } = ctx;
   const stateDir = engine().resolveStateDir(ctx.env);
 
-  // 1. Which scan: the id given, else upstream's latest, else our newest run dir.
-  const scanId = id ?? (await latestScanId());
-  const runDir = scanId ? findRunDir(stateDir, scanId) : latestRunDir(stateDir);
-  if (!scanId && !runDir)
-    throw new CliError('usage', 'No scan to bundle yet.', `Run \`${CLI_NAME} scan\` first.`);
+  // 1. Which scan: the id given, else the newest run dir.
+  const runDir = id ? findRunDir(stateDir, id) : latestRunDir(stateDir);
+  if (!runDir)
+    throw new CliError(
+      'usage',
+      id
+        ? `No scan ${id} on this machine (or the prefix names more than one).`
+        : 'No scan to bundle yet.',
+      id ? `\`${CLI_NAME} scans list\` lists them.` : `Run \`${CLI_NAME} scan\` first.`
+    );
 
   // 2. Collect into a private staging dir.
   const staging = mkdtempSync(join(tmpdir(), 'cynos-debug-'));
   try {
-    const skipped = await collect(ctx, staging, {
-      scanId,
-      runDir,
-      includeTranscripts: Boolean(options.includeTranscripts),
-    });
+    const skipped = await collect(ctx, staging, runDir);
 
     // 3 and 4. Scrub every key, then refuse if one survived.
     const keys = knownKeys(ctx);
@@ -107,7 +102,7 @@ async function debugBundle(
     const files = listFiles(staging);
     const output = resolve(
       options.output ??
-        `cynos-debug-${(scanId ?? basename(runDir ?? 'scan')).slice(0, 12)}-${new Date().toISOString().slice(0, 10)}.tar.gz`
+        `cynos-debug-${(id ?? basename(runDir)).slice(0, 12)}-${new Date().toISOString().slice(0, 10)}.tar.gz`
     );
     terminal.info(terminal.c.bold(`The bundle will hold ${files.length} files:`));
     for (const file of files)
@@ -133,36 +128,14 @@ async function debugBundle(
   }
 }
 
-async function latestScanId(): Promise<string | undefined> {
-  const listed = await upstreamJson(['scans', 'list']);
-  const scans = (listed.value as { scans?: { scanId?: unknown }[] } | undefined)?.scans;
-  const first = scans?.[0]?.scanId;
-  return typeof first === 'string' ? first : undefined;
-}
-
 /** Fills staging; returns what was left out and why. */
-async function collect(
-  ctx: Context,
-  staging: string,
-  target: { scanId: string | undefined; runDir: string | undefined; includeTranscripts: boolean }
-): Promise<[string, string][]> {
-  const skipped: [string, string][] = [];
+async function collect(ctx: Context, staging: string, runDir: string): Promise<[string, string][]> {
   const write = (name: string, value: unknown): void =>
     writeFileSync(join(staging, name), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 
-  // upstream's record of the scan, and its session events with --include-transcripts.
-  if (target.scanId) {
-    const shown = await upstreamJson(['scans', 'show', target.scanId]);
-    write('upstream-scan.json', shown.value ?? { error: shown.error });
-    if (target.includeTranscripts) {
-      const logs = await upstreamJson(['scans', 'logs', target.scanId]);
-      write('upstream-logs.json', logs.value ?? { error: logs.error });
-    }
-  }
-
-  // Our run dir, without what must never be shared.
-  if (target.runDir)
-    skipped.push(...copyRunDir(target.runDir, join(staging, 'run'), target.includeTranscripts));
+  // The run dir, without what must never be shared. Its reports and result are the scan's record
+  // on either runtime: upstream's history does not have a docker scan.
+  const skipped = copyRunDir(runDir, join(staging, 'run'));
 
   // This machine.
   write('versions.json', versions());
@@ -191,21 +164,28 @@ function versions(): Record<string, unknown> {
 
 /**
  * Whether a run-dir file may go in the bundle: a reason to leave it out, or undefined.
- * Transcripts (Codex sessions) hold source code and model turns, so they need the flag.
+ * Transcripts hold source code and model turns, so they never go: Codex's sessions, and the event
+ * stream of a Codex session the engine ran itself (the architecture agent's
+ * knowledge-base/review/events.jsonl, whose commands' output quotes the source). Only the run
+ * dir's own events.jsonl, the CLI's progress events, is kept.
  */
-export function leaveOut(relativePath: string, includeTranscripts: boolean): string | undefined {
+export function leaveOut(relativePath: string): string | undefined {
   const name = basename(relativePath);
   const parts = relativePath.split(/[\\/]/);
   if (/^(auth|credentials)(\..*)?\.json$/i.test(name) || name === '.credentials.json')
     return 'credentials';
   if (/\.(sqlite3?|db)(-wal|-shm)?$/i.test(name)) return 'database';
   if (/\.(zst|gz|tgz|zip|xz|bz2)$/i.test(name)) return 'compressed: cannot be scrubbed';
-  if (!includeTranscripts && (parts.includes('sessions') || /^rollout-.*\.jsonl$/.test(name)))
-    return 'transcript: pass --include-transcripts';
+  if (
+    parts.includes('sessions') ||
+    /^rollout-.*\.jsonl$/.test(name) ||
+    (name === 'events.jsonl' && parts.length > 1)
+  )
+    return 'transcript: holds source code';
   return undefined;
 }
 
-function copyRunDir(from: string, to: string, includeTranscripts: boolean): [string, string][] {
+function copyRunDir(from: string, to: string): [string, string][] {
   const skipped: [string, string][] = [];
   const walk = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -213,7 +193,7 @@ function copyRunDir(from: string, to: string, includeTranscripts: boolean): [str
       const rel = relative(from, path);
       if (entry.isDirectory()) walk(path);
       else if (entry.isFile()) {
-        const reason = leaveOut(rel, includeTranscripts);
+        const reason = leaveOut(rel);
         if (reason) {
           skipped.push([`run/${rel}`, reason]);
           continue;

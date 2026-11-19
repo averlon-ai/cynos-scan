@@ -95,7 +95,7 @@ their diff as the change.
 | The knowledge base's calls (`knowledge-base/cynos.ts`)     | cynos's `POST /v1/decisions` contract and the synthetic fixtures in `__tests__/fixtures/cynos-decisions.json`                  |
 | Flags passed to upstream (`scan-command.ts`)               | `codex-security scan --help` of the pinned version                                                                                          |
 | The docker runtime's hardening                             | `runtime/docker.ts`'s doc comment, and the vendored profiles' source at the pinned tag                                                      |
-| Workflows                                                  | `README.md` "Releases" and `.github/workflows/*.yml`                                                |
+| Workflows                                                  | `CONTRIBUTING.md` "Releases" and `.github/workflows/*.yml`                                                |
 
 ## Contracts
 
@@ -199,7 +199,7 @@ Match the surrounding code's naming and comment density. Run `bun run format` af
   the run's one model catalog (`writeModelCatalog`). A model missing from it fails nothing: Codex
   gives it fallback metadata with a 272k window, and the session compacts early. So when a Codex
   session's model changes or a new session gets its own model (`DEFAULT_MODEL`,
-  `KNOWLEDGE_BASE_MODEL`/`REVIEW_MODEL`, a caller's `--model`), make sure the catalog lists it, and
+  `KNOWLEDGE_BASE_MODEL`/`REVIEW_MODEL`, a caller's model such as `CYNOS_SCAN_MODEL`), make sure the catalog lists it, and
   extend the catalog test in `docker.test.ts`. Direct chat calls (`chatJson`, decisions) do not
   read the catalog.
 - `assets/image.json` selects a prebuilt image when present. Without it, the Docker runtime
