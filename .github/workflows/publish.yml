@@ -1,0 +1,286 @@
+name: Publish
+
+# Only a deliberate dispatch from main can request a release. Build jobs have no OIDC
+# permission; the protected publish job consumes only this run's tested tarballs.
+#
+# The release also publishes the docker runtime's scanner image, and the npm packages pin it:
+# when the engine's tarball holds assets/image.json ({ image, digest }), the docker runtime pulls
+# that image by digest instead of building it from assets/Dockerfile. So the image comes first:
+#
+#   version  the packages' version, refused when its image tag already exists: a version's
+#            image is published once;
+#   image    the image built natively for each architecture and scanned for secrets in every
+#            layer before it is pushed, because the package is public; then pushed by digest,
+#            untagged, with its SBOM and provenance;
+#   index    the two images merged into one index tagged v<version>, checked to be pullable
+#            without credentials (the package must be public);
+#   checks   CI, its tarballs packed with that index's digest in assets/image.json, and the
+#            packed CLI's docker runtime pulling it;
+#   publish  the tarballs checked to pin that digest, then staged on npm.
+#
+# The image is built here, from this repository, with this repository's token: its labels,
+# provenance and attestations name only averlon-ai/cynos-scan.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/averlon-ai/cynos-scan
+
+jobs:
+  version:
+    name: Version
+    if: github.repository == 'averlon-ai/cynos-scan' && github.ref == 'refs/heads/main' && github.event.repository.visibility == 'public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # ci.yml checks again that both packages hold this stable version.
+      - name: Read the version
+        id: version
+        run: |
+          version="$(node -p 'require("./packages/cli/package.json").version')"
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::packages/cli/package.json's version $version is not a stable release version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # A published tag is never moved: npm users of that version may already pin its digest.
+      # Any failure to read it means it does not exist (the package may not exist yet either).
+      - name: Refuse a version whose image exists
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:v$VERSION" > /dev/null 2>&1; then
+            echo "::error::$IMAGE:v$VERSION already exists; bump the packages' version"
+            exit 1
+          fi
+
+  image:
+    name: Scanner image (${{ matrix.arch }})
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Built into the local Docker first, with nothing pushed, so the secret scan runs before
+      # anything reaches the public package.
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: packages/engine/assets
+          load: true
+          tags: cynos-scan-scanner:candidate
+          provenance: false
+          sbom: false
+      # Every layer, upstream's and the base image's included. Their dependencies ship test
+      # fixtures that look like keys, so an unverified match is only listed; a secret that
+      # TruffleHog verified as live, or could not check, fails the release.
+      #
+      # FIXTURES are the files whose placeholders TruffleHog cannot check, so they would fail
+      # every release: their hosts (host:1234, example.com) never answer, and a Debian package
+      # checksum looks like a Red Hat key. Each is an exact path, as TruffleHog matches them; a
+      # match anywhere else, or one of these files moving, fails the release for a look.
+      - name: Scan the image for secrets
+        env:
+          FIXTURES: >-
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/zod/src/v4/classic/tests/template-literal.test.ts,
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/fast-uri/test/host-delimiter-security.test.js,
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/fast-uri/test/fixtures/uri-js-parse.json,
+            /usr/share/perl/5.36.0/HTTP/Tiny.pm,
+            /var/lib/dpkg/available
+        run: |
+          mkdir -p "$RUNNER_TEMP/image"
+          docker save cynos-scan-scanner:candidate --output "$RUNNER_TEMP/image/image.tar"
+          docker run --rm --volume "$RUNNER_TEMP/image:/scan:ro" \
+            ghcr.io/trufflesecurity/trufflehog:3.99.8@sha256:674b2f187620a19df77f44cf9a7d77efcc581a5662accef2f2739cbb46ba4a3a \
+            docker --image file:///scan/image.tar --no-update --results=verified,unknown --fail \
+            --exclude-paths="${FIXTURES// /}"
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The same build again, from the builder's cache, so the layers are the ones just scanned.
+      # Pushed by digest with no tag: only the index below is tagged.
+      - name: Push
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: packages/engine/assets
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          provenance: mode=max
+          sbom: true
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          echo "$DIGEST" > "$RUNNER_TEMP/digests/$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scanner-image-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  index:
+    name: Scanner image index
+    needs: [version, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      reference: ${{ steps.index.outputs.reference }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scanner-image-digest-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The index carries the source annotation too: GHCR reads a multi-architecture image's
+      # description and repository from its index.
+      - name: Merge the index
+        id: index
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGE:v$VERSION" \
+            --annotation "index:org.opencontainers.image.source=$SOURCE" \
+            --annotation "index:org.opencontainers.image.description=cynos's scanner image: upstream @openai/codex-security, unmodified, for the docker runtime" \
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
+            "$IMAGE@$(cat digests/amd64)" "$IMAGE@$(cat digests/arm64)"
+          digest="$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "reference=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+          echo "Scanner image: \`$IMAGE:v$VERSION\` (\`$IMAGE@$digest\`)" >> "$GITHUB_STEP_SUMMARY"
+      # npm users pull the image with no credentials. A new package is private until a package
+      # admin makes it public (once, in its settings).
+      - name: Check the image is public
+        env:
+          REFERENCE: ${{ steps.index.outputs.reference }}
+        run: |
+          repository="${IMAGE#ghcr.io/}"
+          token="$(curl --fail --silent --show-error "https://ghcr.io/token?scope=repository:$repository:pull" | jq --raw-output .token)"
+          if ! curl --fail --silent --show-error --output /dev/null \
+            --header "Authorization: Bearer $token" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://ghcr.io/v2/$repository/manifests/${REFERENCE#*@}"; then
+            echo "::error::$REFERENCE cannot be pulled without credentials: set the cynos-scan package's visibility to Public in its settings, then re-run the failed jobs"
+            exit 1
+          fi
+
+  checks:
+    needs: index
+    uses: ./.github/workflows/ci.yml
+    with:
+      scanner-image: ${{ needs.index.outputs.reference }}
+
+  publish:
+    needs: [index, checks]
+    if: github.repository == 'averlon-ai/cynos-scan' && github.ref == 'refs/heads/main' && github.event.repository.visibility == 'public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # No checkout, dependency installation, package scripts, or shared cache in this job.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.12.1'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-packages-${{ github.run_attempt }}
+          path: dist
+      # The engine must pin exactly the image this run published (assets/image.json).
+      - name: Verify the tarballs
+        working-directory: dist
+        env:
+          SCANNER_IMAGE: ${{ needs.index.outputs.reference }}
+        run: |
+          sha256sum --check SHA256SUMS
+          node --input-type=module <<'JS'
+          import { readdirSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const files = readdirSync('.').filter(name => name.endsWith('.tgz'));
+          const expected = new Set(['@averlon-ai/cynos', '@averlon-ai/cynos-scan-engine']);
+          const versions = new Set();
+          if (files.length !== 2) throw new Error('Expected exactly two packages');
+          for (const file of files) {
+            const pkg = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
+            if (!expected.delete(pkg.name) || pkg.repository?.url !== 'git+https://github.com/averlon-ai/cynos-scan.git' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org' || pkg.publishConfig?.access !== 'public') {
+              throw new Error('Unexpected package identity or registry');
+            }
+            versions.add(pkg.version);
+            if (pkg.name === '@averlon-ai/cynos-scan-engine') {
+              const pinned = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/assets/image.json'], { encoding: 'utf8' }));
+              if (`${pinned.image}@${pinned.digest}` !== process.env.SCANNER_IMAGE) {
+                throw new Error(`The engine pins ${pinned.image}@${pinned.digest}, not ${process.env.SCANNER_IMAGE}`);
+              }
+            }
+          }
+          if (expected.size || versions.size !== 1) throw new Error('Package versions must match');
+          JS
+      - name: Stage packages using npm trusted publishing
+        # npm's trusted publisher must allow staging only. A maintainer approves with 2FA
+        # on npm after reviewing the version, provenance, and tarball hashes.
+        working-directory: dist
+        env:
+          # npm otherwise hides OIDC exchange failures behind a generic ENEEDAUTH error.
+          NPM_CONFIG_LOGLEVEL: verbose
+        run: |
+          node --input-type=module <<'JS'
+          for (const name of ['ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN']) {
+            if (!process.env[name]) throw new Error(`GitHub did not provide ${name}; check id-token: write permissions`);
+          }
+          JS
+          npm stage publish ./averlon-ai-cynos-scan-engine-*.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org --provenance
+          npm stage publish ./averlon-ai-cynos-[0-9]*.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org --provenance

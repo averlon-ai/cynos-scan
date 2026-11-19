@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
   workflow_call:
+    inputs:
+      scanner-image:
+        description: >-
+          The release's scanner image, image@sha256:<digest>, for the packed engine to pin in
+          assets/image.json; empty packs no pin, and the docker runtime builds the image
+        type: string
+        default: ''
   workflow_dispatch:
 
 permissions:
@@ -57,6 +64,21 @@ jobs:
           bun-version: '1.3.3'
       - run: bun install --frozen-lockfile
       - run: bun run build
+      # A release (publish.yml) pins the scanner image it published: the engine ships assets/,
+      # and with assets/image.json there the docker runtime pulls that digest instead of building.
+      # The file is written only here, never committed.
+      - name: Pin the scanner image
+        if: inputs.scanner-image != ''
+        env:
+          SCANNER_IMAGE: ${{ inputs.scanner-image }}
+        run: |
+          if ! [[ "$SCANNER_IMAGE" =~ ^([^@]+)@(sha256:[0-9a-f]{64})$ ]]; then
+            echo "::error::scanner-image $SCANNER_IMAGE is not <image>@sha256:<digest>"
+            exit 1
+          fi
+          printf '{ "image": "%s", "digest": "%s" }\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" \
+            > packages/engine/assets/image.json
+          cat packages/engine/assets/image.json
       - name: Pack the release artifacts
         run: |
           node --input-type=module <<'JS'
@@ -77,10 +99,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes bubblewrap apparmor-profiles
           sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+      # With a pinned image, the docker runtime too: it pulls the pin with no registry login, as
+      # an npm user's does.
       - name: Test the packed CLI
         env:
           CYNOS_NO_UPDATE_NOTICE: '1'
-        run: bash scripts/install-smoke.sh dist/averlon-ai-cynos-[0-9]*.tgz native
+          SCANNER_IMAGE: ${{ inputs.scanner-image }}
+        run: |
+          runtimes=(native)
+          if [ -n "$SCANNER_IMAGE" ]; then runtimes+=(docker); fi
+          bash scripts/install-smoke.sh dist/averlon-ai-cynos-[0-9]*.tgz "${runtimes[@]}"
       - name: Audit installed dependencies
         run: bash scripts/audit-package.sh dist/averlon-ai-cynos-[0-9]*.tgz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
