@@ -242,6 +242,12 @@ export const C_SCAN_OUT = `${C_OUT}/scan`;
 export const C_STATE = '/scan/state';
 /** HOME and working directory, owned by the runner's uid. */
 export const C_HOME = `${C_STATE}/home`;
+/**
+ * Codex's temporary directory in the Codex home upstream keeps under its state dir: a tmpfs, not
+ * part of the state mount (runtime/docker.ts, mounts).
+ */
+export const CODEX_TMP_DIR = 'codex-home/tmp';
+export const C_CODEX_TMP = `${C_STATE}/${CODEX_TMP_DIR}`;
 /** The architecture review agent's directory: its home, index, reader and answer. */
 export const C_REVIEW = '/scan/review';
 /** The code graph's home inside its container. */

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 - 2026-11-24
+
+### Fixed
+
+- Keep Codex's temporary sandbox launchers on a private tmpfs in Docker runs, preventing Docker Desktop on Mac from deleting active launchers and breaking subsequent shell commands.
+- Point scan drafts and validation retries to the draft tool's schema, avoiding rejected threat-model scope fields.
+- Require trace checks to account for every failed call, including yielded exec cells, and exclude duplicate run directories and the check's own sessions.
+
 ## 0.3.0 - 2026-11-19
 
 ### Changed

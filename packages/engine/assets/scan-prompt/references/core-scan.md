@@ -117,8 +117,10 @@ no `exec` and no analysis of the code.
 
 In one `exec`, publish `phase: "threat_model"` (`update_codex_security_scan_progress`) and save
 the threat model in a `complete: false` draft, with `findings: []` and this exact empty review
-state: `{ surfaces: [], explicitExclusions: [], deferred: [] }`. Load the threat model from the
-knowledge base, `store()` it, and use it unchanged here and at submit:
+state: `{ surfaces: [], explicitExclusions: [], deferred: [] }`. The draft's own fields are the
+ones `"$CODEX_SECURITY_PLUGIN_ROOT/schemas/tools/scan-draft.schema.json"` declares, not the threat
+model's. Load the threat model from the knowledge base, `store()` it, and use it unchanged here and
+at submit:
 
 ```js
 const tmFile = (

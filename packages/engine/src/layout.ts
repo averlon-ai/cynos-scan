@@ -30,6 +30,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CODEX_TMP_DIR } from './constants';
 import { runCommand, type Runner } from './processes';
 
 /** This run's scan prompt, the caller's addendum, written into its workspace (pipeline.ts). */
@@ -125,10 +126,15 @@ export function createScanDir(stateDir: string, project: string): string {
   return realpathSync(scanDir);
 }
 
-/** Creates out/ and state/home/ under workspace, private to this user. */
+/**
+ * Creates out/, state/home/ and state/codex-home/tmp/ under workspace, private to this user. The
+ * last is where the docker runtime mounts a tmpfs (runtime/docker.ts, mounts); Docker would
+ * otherwise create the mountpoint, and on Linux the Codex home above it, as root.
+ */
 export function prepareWorkspace(workspace: string): void {
   mkdirSync(join(workspace, 'out'), { recursive: true, mode: 0o700 });
   mkdirSync(join(workspace, 'state', 'home'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(workspace, 'state', CODEX_TMP_DIR), { recursive: true, mode: 0o700 });
 }
 
 /**
