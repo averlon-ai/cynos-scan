@@ -693,10 +693,11 @@ submit one. The workbench writes scan-manifest.json and findings.json from your 
 
   Leave out the fields the workbench derives (it rejects them with "expected never"), for example
   `reviewState.mode`, `reviewState.inventoryStrategy` and `reviewState.receiptRefs`.
-- **The tool is the check.** It validates each draft against its schema and either accepts it or
+- **The tool is the check.** It validates each draft against its schema
+  (`"$CODEX_SECURITY_PLUGIN_ROOT/schemas/tools/scan-draft.schema.json"`) and either accepts it or
   lists every problem, so do not read the schema or example scans first. If it lists problems,
-  fix every listed item in one pass, in code, without dropping valid findings or evidence, and
-  submit again; retry at most twice.
+  look up each field it names in that schema, fix every listed item in one pass, in code, without
+  dropping valid findings or evidence, and submit again; retry at most twice.
 - **The review state** describes the code reviewed. Give every surface reviewed its final
   disposition: `reported`, `no_issue_found`, `rejected` (for example dead, unreachable or
   commented-out code, or a false positive) or `not_applicable`. Mark a surface `needs_follow_up`

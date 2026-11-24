@@ -8,14 +8,16 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import {
   AUTO_COMPACT_TOKEN_LIMIT,
   BASE_INSTRUCTIONS_SHA256,
   BASE_URL,
+  C_CODEX_TMP,
   C_HELPER_CONTEXT,
   C_HOME,
   C_KB_INDEX,
@@ -38,7 +40,7 @@ import {
   MODEL_CONTEXT_WINDOW,
 } from '../constants';
 import { REVIEW_MODEL } from '../knowledge-base/architecture';
-import { discardWorkspace } from '../layout';
+import { discardWorkspace, prepareWorkspace } from '../layout';
 import {
   appArmorProfileLoaded,
   copyBundledPlugin,
@@ -222,6 +224,16 @@ describe('dockerScanCommand', () => {
     expect(C_HOME.startsWith(`${C_STATE}/`)).toBe(true);
   });
 
+  it("keeps Codex's sandbox launchers on a tmpfs private to the runner, where their locks hold", () => {
+    // On a bind mount from Docker Desktop for Mac, a Codex process that starts deleted the
+    // running scan's codex-linux-sandbox, and every command after that failed.
+    for (const kind of ['scan', 'preflight'] as const)
+      expect(after(command({}, kind), '--tmpfs')).toBe(
+        `${C_CODEX_TMP}:uid=1001,gid=1001,mode=0700`
+      );
+    expect(C_CODEX_TMP).toBe(`${C_STATE}/codex-home/tmp`);
+  });
+
   it("builds upstream's scan arguments", () => {
     const args = command({
       paths: ['-dash', 'functions'],
@@ -327,6 +339,17 @@ describe('dockerScanCommand', () => {
 
   it('omits verbose when asked', () => {
     expect(command({ verbose: false })).not.toContain('--verbose');
+  });
+});
+
+describe('prepareWorkspace', () => {
+  it("makes the tmpfs's mountpoint and Codex's home the runner's, so Docker does not make them root's", () => {
+    // Upstream refuses a Codex home its user does not own.
+    const workspace = join(mkdtempSync(join(tmpdir(), 'cs-prepare-')), 'stage');
+    prepareWorkspace(workspace);
+    const state = join(workspace, 'state');
+    for (const directory of ['home', 'codex-home', relative(C_STATE, C_CODEX_TMP)])
+      expect(statSync(join(state, directory)).mode & 0o777).toBe(0o700);
   });
 });
 

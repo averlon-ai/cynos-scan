@@ -150,6 +150,15 @@ describe("the drafts, by upstream's draft tool schema", () => {
     expect(TEMPLATE).toContain('never a file path or a code identifier');
   });
 
+  it("points the lead's drafts at the draft tool's schema", () => {
+    // The lead copied the threat model example's scope (includePaths) into its first draft, whose
+    // own scope forbids paths, and the tool rejected it with "expected never ... at
+    // scope.includePaths" in every scan. The schema, not prose about it, says what a draft holds.
+    expect(TEMPLATE).toContain(
+      '`"$CODEX_SECURITY_PLUGIN_ROOT/schemas/tools/scan-draft.schema.json"`'
+    );
+  });
+
   it('names only review state fields upstream declares', () => {
     const named = [...TEMPLATE.matchAll(/reviewState\.(\w+)/g)].map(m => m[1]!);
     expect(named.length).toBeGreaterThan(0);

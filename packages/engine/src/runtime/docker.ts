@@ -38,6 +38,7 @@ import {
   C_HELPER_CONTEXT,
   C_PLUGIN,
   C_RUBRIC,
+  C_CODEX_TMP,
   C_HOME,
   C_KB_INDEX,
   C_KNOWLEDGE_BASE,
@@ -148,13 +149,35 @@ export function bind(
   return ['-v', `${hostPath(source, hostPaths)}:${target}${writable ? '' : ':ro'}`];
 }
 
-/** The caller's checkout (read-only: nothing the scanner writes reaches it), and the run's output and Codex state. */
+/**
+ * The caller's checkout (read-only: nothing the scanner writes reaches it), and the run's output
+ * and Codex state. Codex's temporary directory inside that state is a tmpfs (codexTmpMount).
+ */
 export function mounts(project: string, workspace: string, hostPaths: HostPaths = []): string[] {
   return [
     ...bind(project, C_PROJECT, hostPaths),
     ...bind(join(workspace, 'out'), C_OUT, hostPaths, true),
     ...bind(join(workspace, 'state'), C_STATE, hostPaths, true),
   ];
+}
+
+/**
+ * A tmpfs over Codex's temporary directory, private to the runner, because a lock that keeps a
+ * running Codex's sandbox launcher alive does not hold on a bind mount from Docker Desktop.
+ *
+ * Every Codex process keeps its sandbox launcher (codex-linux-sandbox) in its own directory under
+ * codex-home/tmp/arg0-linux and holds a lock on it; every Codex process that starts deletes the
+ * directories whose lock it can take, as left behind by processes that exited. On the state bind
+ * mount a live process's lock did not stop that: about a minute in, a second Codex process
+ * deleted the lead's launcher, every command of the lead and the helpers failed from then on
+ * (`Failed to create unified exec process: No such file or directory`), and the scan still
+ * completed with whatever they had read (one finding on DSVW, where the native runtime finds 22).
+ * On a tmpfs the lock holds. The directory holds only those per-process links, nothing kept as
+ * evidence. Its mountpoint already exists in the state dir (prepareWorkspace), so Docker does not
+ * create it, as root, in the runner's state.
+ */
+export function codexTmpMount(uid: number, gid: number): string[] {
+  return ['--tmpfs', `${C_CODEX_TMP}:uid=${uid},gid=${gid},mode=0700`];
 }
 
 /**
@@ -233,6 +256,7 @@ export function dockerScanCommand(
     ...hardeningOptions(plan.actionRoot, plan.apparmor),
     ...containerEnvironment(),
     ...mounts(plan.project, plan.workspace, plan.hostPaths),
+    ...codexTmpMount(plan.uid, plan.gid),
     ...bind(join(plan.workspace, RUN_PROMPT_FILE), C_PROMPT, plan.hostPaths),
     ...bind(join(plan.workspace, MODEL_CATALOG_FILE), C_MODEL_CATALOG, plan.hostPaths),
   ];
@@ -324,6 +348,7 @@ export function sarifExportCommand(plan: Omit<ContainerPlan, 'name'>): string[] 
     'none',
     ...containerEnvironment(),
     ...mounts(plan.project, plan.workspace, plan.hostPaths),
+    ...codexTmpMount(plan.uid, plan.gid),
     plan.image,
     'export',
     C_SCAN_OUT,

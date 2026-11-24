@@ -18,7 +18,8 @@
 #   - Codex, reading its agents' traces, sees no pattern of tool calls failing because of the
 #     workflow (check-scan-traces.mjs): a scan tool refusing calls, or a script, path or command
 #     the workflow gives failing. A scan recovers from those at a few retry turns each, so its
-#     outcome never shows them.
+#     outcome never shows them. The check lists every failed call the traces record, and Codex
+#     must say of each whether the workflow caused it or why not.
 #
 # It runs this checkout's build, or CYNOS_BIN (an installed cynos). The key is read by cynos from
 # CYNOS_API_KEY, never passed in argv; CYNOS_BASE_URL names another cynos gateway than the

@@ -129,4 +129,8 @@ fi
   exit 1
 }
 
+# The unpacked copy was only for these checks; the run dir it copies is the scan's, and a later
+# reader of the work dir (check-scan-traces.mjs) must not take it for another run.
+rm -rf "$out/bundle"
+
 echo "scans commands ($runtime, $kind) passed"
