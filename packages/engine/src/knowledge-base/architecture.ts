@@ -76,6 +76,9 @@ const CHARS_PER_TOKEN = 3.5;
 const MAX_ITEMS = 30;
 
 // A path may hold brackets or parentheses (Next.js `app/[id]`, `app/(auth)`) but does not start with one.
+// Reviewed for regexp/no-super-linear-move: quadratic only on a long path-like run with no
+// `.ext:line` after it (about 1 s at 50,000 characters on Node). It reads the review's own text.
+// eslint-disable-next-line regexp/no-super-linear-move -- see above
 const CITATION = /([A-Za-z0-9_@~.\-][A-Za-z0-9_@~.\-/\[\]()+]*\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?/g;
 
 /** The files a text cites as `path:line`. */
@@ -624,9 +627,14 @@ export function cutInvalid(
 /**
  * A credential assignment: a name that says credential, then its literal value or fallback,
  * as in `JWT_SECRET = '…'`, `password: '…'`, `secret: process.env.JWT_SECRET || '…'`.
+ *
+ * It reads whole files, so it is written to stay linear on them: a match starts only where a name
+ * starts (not at each `.` or `-` inside one, which rescanned the rest: 0.9 s for a 50,000-character
+ * minified line on Node), and the fallback (`… ||`) starts past the spaces after `=` (reading them
+ * two ways took 0.6 s at 50,000 spaces). Both find what the earlier pattern found.
  */
 const CREDENTIAL_ASSIGNMENT =
-  /\b[\w.-]*?(?:secret|passw|pwd|api[_-]?key|access[_-]?key|token|credential|private[_-]?key|signing[_-]?key|salt)[\w-]*['"]?\s*(?:[:=]|=>)\s*(?:[^'"\n]*?(?:\|\||\?\?|\bor\b)\s*)?(['"])([^'"\s]{8,})\1/gi;
+  /(?<![\w.-])[\w.-]*?(?:secret|passw|pwd|api[_-]?key|access[_-]?key|token|credential|private[_-]?key|signing[_-]?key|salt)[\w-]*['"]?\s*(?:[:=]|=>)\s*(?:(?!\s)[^'"\n]*?(?:\|\||\?\?|\bor\b)\s*)?(['"])([^'"\s]{8,})\1/gi;
 
 /**
  * A value that looks like a credential: it has a digit or a symbol other than `_ - .`, or is a

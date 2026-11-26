@@ -297,8 +297,11 @@ export class NativeRuntime implements ScanRuntime {
       env: upstreamEnvironment(layout, key),
       name,
       cwd: layout.workspace,
-      // The dashboard reads keys from stdin and draws on stderr; stdout is still the result.
-      ...(interactive ? { stdio: ['inherit', 'pipe', 'inherit'] as StdioOptions } : {}),
+      // The dashboard draws on stderr; stdout is still the result. No stdin: with a terminal's
+      // keyboard upstream ends the scan by asking to open its findings for patching (cli.js
+      // executeScan, "Open findings for review?"), which a cynos scan does not offer. Ctrl-C
+      // still reaches upstream as the terminal's SIGINT.
+      ...(interactive ? { stdio: ['ignore', 'pipe', 'inherit'] as StdioOptions } : {}),
     };
   }
 

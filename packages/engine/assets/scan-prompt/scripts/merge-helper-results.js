@@ -59,14 +59,22 @@ for (const f of all) {
 // _semantic_identifier): accents dropped, lowercased, every other run of characters a "-", no
 // leading non-alphanumerics or trailing "-". A finding whose rule, anchor and instance an earlier
 // one has, which the workbench refuses, gets the workbench's own split: its instance with -2, -3,
-// ..., taking no other finding's identity.
+// ..., taking no other finding's identity. The trailing "-" go in a loop: a regex (/-+$/) takes
+// quadratic time on a long run of "-" inside a name.
+const withoutTrailingDashes = text => {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '-') end--;
+  return text.slice(0, end);
+};
 const slug = (value, fallback) =>
-  String(value)
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9._/-]+/g, '-')
-    .replace(/^[^a-z0-9]+|-+$/g, '') || fallback;
+  withoutTrailingDashes(
+    String(value)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9._/-]+/g, '-')
+      .replace(/^[^a-z0-9]+/, '')
+  ) || fallback;
 merged.forEach((f, i) => {
   for (const field of ['anchor', 'instance'])
     if (f.identity?.[field] !== undefined)

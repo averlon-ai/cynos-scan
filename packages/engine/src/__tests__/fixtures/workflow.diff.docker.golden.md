@@ -717,6 +717,18 @@ submit one. The workbench writes scan-manifest.json and findings.json from your 
 - **Finishing.** A reply that contains no tool call ends your turn, and ending your turn finishes
   the scan: until the draft tool has accepted a `complete: true` draft, every reply makes a tool
   call (while a helper is still running, a `wait_agent` call). Ending your turn without an
-  accepted `complete: true` draft fails the scan. If the accepted draft leaves open a surface or
-  task you did finish, fix it and submit again. The workbench wrote both canonical files when it
+  accepted `complete: true` draft fails the scan. The workbench wrote both canonical files when it
   accepted the draft: never list, read or edit them afterwards.
+- **After the accepted draft.** An accepted `complete: true` draft finishes the scan. Submit again
+  only if it leaves open a surface or task you did finish, and then only a whole draft that is
+  `complete: true` again: the scan's completeness is its last draft's, so a `complete: false`
+  draft after it fails the scan.
+- **Findings already submitted.** The workbench keeps the findings of earlier drafts and matches a
+  finding to its earlier version by its `ruleId`, `identity` and locations: a later draft that
+  changes one of those adds a second finding instead of replacing the first, and a draft with
+  fewer findings, or none, removes nothing. So keep those three as submitted, and never submit an
+  empty or partial draft to start over. The one exception is an `identity` the evidence shows is
+  wrong: correct it before the `complete: true` draft, never after, as "Historical findings and
+  coverage" in `"$CODEX_SECURITY_PLUGIN_ROOT/references/final-report.md"` describes (a
+  `complete: false` draft whose revision lists the earlier version in
+  `provenance.previousFindings`).

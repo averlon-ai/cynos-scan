@@ -42,6 +42,7 @@ import { ProcessRegistry, stopProcesses } from '../processes';
 import { RUNTIMES, type RuntimeName } from '../runtime';
 import { killContainer, provideImage, verifyProfiles, type HostPaths } from '../runtime/docker';
 import type { Usage } from '../scan-run';
+import { withoutTrailing } from '../text.js';
 
 /** A usage error: the arguments or the environment are wrong, and nothing ran. */
 export class UsageError extends Error {}
@@ -94,7 +95,7 @@ export function parseHostPaths(values: string[]): HostPaths {
     if (!here?.startsWith('/') || !host?.startsWith('/') || rest.length)
       throw new UsageError(`--host-path takes /path/here=/path/on/host, not ${value}`);
     // Trailing slashes go, but the root stays the root.
-    return [here.replace(/\/+$/, '') || '/', host.replace(/\/+$/, '') || '/'];
+    return [withoutTrailing(here, '/') || '/', withoutTrailing(host, '/') || '/'];
   });
 }
 
@@ -138,7 +139,8 @@ export function parseScanArgs(argv: string[], script = process.argv[1] ?? ''): B
   const timeoutSeconds = Number(values.timeout);
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 0)
     throw new UsageError('--timeout takes whole seconds (0 = no limit)');
-  const baseUrl = values['base-url']?.replace(/\/+$/, '');
+  const baseUrl =
+    values['base-url'] === undefined ? undefined : withoutTrailing(values['base-url'], '/');
   if (baseUrl !== undefined && !/^https?:\/\/[^\s"]+$/.test(baseUrl))
     throw new UsageError('--base-url must be an http(s) URL');
   const price = parsePrice(values.price);

@@ -751,8 +751,8 @@ Return JSON: {"packets": [{"id", "perspective", "attacker", "changed_files", "co
 const slug = (raw: unknown, n: number): string =>
   String(raw ?? '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(/[^a-z0-9]+/g, '-') // one dash per run, so at most one at each end
+    .replace(/^-|-$/g, '')
     .slice(0, 48) || `packet-${n}`;
 
 /**

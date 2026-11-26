@@ -571,8 +571,8 @@ export function checkedDesign(design: unknown, maxPackets: number, product: Set<
     let id =
       String(p['id'] ?? '')
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
+        .replace(/[^a-z0-9]+/g, '-') // one dash per run, so at most one at each end
+        .replace(/^-|-$/g, '')
         .slice(0, 48) || `packet-${packets.length + 1}`;
     while (seen.has(id)) id += '-x';
     seen.add(id);

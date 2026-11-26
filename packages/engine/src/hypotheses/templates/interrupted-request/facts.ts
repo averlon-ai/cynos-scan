@@ -391,8 +391,15 @@ function components(input: HypothesisInput): Component[] {
     .map(({ path, inputs, parsers }) => ({ path, inputs, parsers }));
 }
 
-/** `hook = fn;` or `s.hook = &fn;`: a name a function is installed in (not a call, not `==`). */
-const INSTALL = /([A-Za-z_][\w.>-]*)\s*=\s*&?([A-Za-z_]\w*)\s*;/g;
+/**
+ * `hook = fn;` or `s.hook = &fn;`: a name a function is installed in (not a call, not `==`).
+ *
+ * A match starts only where a run of name characters (`\w . > -`) starts, past any of them a name
+ * can't start with: from inside a run, each start rescanned the rest of it, which took quadratic
+ * time on a file's long run (1.4 s at 50,000 characters on Node), and the run's start finds the
+ * same name.
+ */
+const INSTALL = /(?<![\w.>-])[\d.>-]*([A-Za-z_][\w.>-]*)\s*=\s*&?([A-Za-z_]\w*)\s*;/g;
 
 /**
  * The files that run a component's code: the direct callers of its input code, and the files that

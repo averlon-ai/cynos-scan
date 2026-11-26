@@ -13,13 +13,29 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { readScanInputs } from '@averlon-ai/cynos-scan-engine';
-import type { ScanConfig, ScanIO, ScanResult } from '../engine';
+import type {
+  KnowledgeBaseStore,
+  RunFinish,
+  ScanConfig,
+  ScanEvent,
+  ScanIO,
+  ScanResult,
+  TelemetryOptions,
+} from '../engine';
 import { captureOutput, mockEngine, setEngine } from './engine-mock';
 
 mockEngine();
 const { run } = await import('../cli');
-const { interactiveScan, parseTimeout, parseHostPaths, linkScanId, newRunName } =
-  await import('../commands/scan');
+const {
+  interactiveScan,
+  parseTimeout,
+  parseHostPaths,
+  linkScanId,
+  newRunName,
+  failedRunFinish,
+  scannedRunFinish,
+} = await import('../commands/scan');
+const { CliError } = await import('../exit-codes');
 const { maxHypothesisPackets, scanSwitches } = await import('../settings');
 
 /** A committed git repository, as scripts/e2e.sh makes one. */
@@ -38,8 +54,48 @@ function fixture(): { project: string; head: string } {
   return { project, head: git('rev-parse', 'HEAD').stdout.trim() };
 }
 
+/** What one run told its telemetry: the CLI's fake of the engine's ScanTelemetry, which sends nothing. */
+interface TelemetryRecord {
+  options: TelemetryOptions;
+  started: boolean;
+  phases: string[];
+  cacheFailures: string[];
+  finished?: RunFinish;
+}
+const telemetryRuns: TelemetryRecord[] = [];
+/** Run when the fake telemetry is told the run finished: what a test checks at that moment. */
+let onTelemetryFinished: (() => void) | undefined;
+
+class RecordingTelemetry {
+  readonly enabled = true;
+  private readonly record: TelemetryRecord;
+  constructor(options: TelemetryOptions) {
+    this.record = { options, started: false, phases: [], cacheFailures: [] };
+    telemetryRuns.push(this.record);
+  }
+  progress(event: ScanEvent): void {
+    if (event.type === 'phase' && event.status !== 'start')
+      this.record.phases.push(`${event.phase}:${event.status}`);
+  }
+  measureStore(store: KnowledgeBaseStore): KnowledgeBaseStore {
+    return store;
+  }
+  cacheFailed(step: string): void {
+    this.record.cacheFailures.push(step);
+  }
+  async started(): Promise<void> {
+    this.record.started = true;
+  }
+  async finished(finish: RunFinish): Promise<void> {
+    onTelemetryFinished?.();
+    this.record.finished ??= finish;
+  }
+}
+
 /** The engine's constants every fake engine needs: the CLI keeps no copies of its own. */
 const ENGINE_CONSTANTS = {
+  ScanTelemetry: RecordingTelemetry,
+  repositoryIdentity: (remote: string) => (remote ? 'github.com/acme/api' : undefined),
   DEFAULT_MODEL: 'deepseek/deepseek-v4.1-flash',
   BASE_URL: 'https://cynos.example/v1',
   SEVERITIES: ['critical', 'high', 'medium', 'low', 'informational'],
@@ -607,6 +663,155 @@ describe('scan options for a harness: prompt addendum, cynos switches, time limi
         message:
           'The scan was stopped: timed out after 1s. The knowledge base could not be built, so no scan was started: graph exited',
       },
+    });
+  });
+});
+
+describe('scan telemetry', () => {
+  test("a scan that calls the model reports its start, its phases and its finish, as its repository's", async () => {
+    const { project } = fixture();
+    spawnSync('git', ['-C', project, 'remote', 'add', 'origin', 'git@github.com:acme/api.git']);
+    fakeScan(mkdtempSync(join(tmpdir(), 'cynos-scan-state-')));
+    const key = 'cynos-0123456789abcdef';
+    const { value } = await captureOutput(() =>
+      run(['scan', project, '--headless', '--format', 'json'], { ...baseEnv(), CYNOS_API_KEY: key })
+    );
+    expect(value).toBe(0);
+    const telemetry = telemetryRuns.at(-1)!;
+    expect(telemetry.options).toMatchObject({
+      key,
+      client: 'cli',
+      kind: 'full',
+      enabled: true,
+      repository: 'github.com/acme/api',
+      checkout: realpathSync(project),
+    });
+    expect(telemetry.started).toBe(true);
+    expect(telemetry.phases).toEqual(['stage:end']);
+    expect(telemetry.finished).toEqual({ outcome: 'completed' });
+  });
+
+  // The finish is sent once the signal handlers are gone; a Ctrl-C while it waits must find the
+  // scan's result already saved.
+  test("a scan's result is saved before its finish is reported", async () => {
+    const { project } = fixture();
+    const state = mkdtempSync(join(tmpdir(), 'cynos-scan-state-'));
+    fakeScan(state);
+    // The run dirs holding a result; the scan-id link beside each is not counted again.
+    const scans = join(state, 'averlon', 'scans');
+    const results = (): string[] =>
+      existsSync(scans)
+        ? readdirSync(scans).filter(
+            run =>
+              !lstatSync(join(scans, run)).isSymbolicLink() &&
+              existsSync(join(scans, run, 'cli-result.json'))
+          )
+        : [];
+    let savedWhenFinished: string[] | undefined;
+    onTelemetryFinished = () => {
+      savedWhenFinished = results();
+    };
+    try {
+      const { value } = await captureOutput(() =>
+        run(['scan', project, '--headless', '--format', 'json'], {
+          ...baseEnv(),
+          CYNOS_API_KEY: 'cynos-0123456789abcdef',
+        })
+      );
+      expect(value).toBe(0);
+    } finally {
+      onTelemetryFinished = undefined;
+    }
+    expect(savedWhenFinished).toHaveLength(1);
+  });
+
+  test('a mock scan makes no model calls and reports nothing', async () => {
+    const { project } = fixture();
+    fakeScan(mkdtempSync(join(tmpdir(), 'cynos-scan-state-')));
+    await captureOutput(() => run(['scan', project, '--headless', '--format', 'json'], mockEnv()));
+    expect(telemetryRuns.at(-1)!.options.enabled).toBe(false);
+  });
+
+  test("a scan that fails reports the failure's kind", async () => {
+    const { project } = fixture();
+    const failure = new Error('The knowledge base could not be built, so no scan was started');
+    setEngine({
+      ...ENGINE_CONSTANTS,
+      readScanInputs,
+      resolveStateDir: () => mkdtempSync(join(tmpdir(), 'cynos-scan-state-')),
+      LocalKnowledgeBaseStore: class {
+        async restore() {
+          return undefined;
+        }
+        async save() {}
+      },
+      scanCheckout: async () => {
+        throw failure;
+      },
+    });
+    const { value } = await captureOutput(() =>
+      run(['scan', project, '--headless', '--format', 'json'], {
+        ...baseEnv(),
+        CYNOS_API_KEY: 'cynos-0123456789abcdef',
+      })
+    );
+    expect(value).toBe(2);
+    process.exitCode = 0;
+    expect(telemetryRuns.at(-1)!.finished).toEqual({
+      outcome: 'failed',
+      errorKind: 'knowledge-base',
+      error: failure,
+    });
+  });
+
+  test('Ctrl-C and SIGTERM cancel a run; --timeout fails it', () => {
+    expect(failedRunFinish(new CliError('interrupted', 'stopped'))).toEqual({
+      outcome: 'cancelled',
+    });
+    expect(failedRunFinish(new CliError('terminated', 'stopped'))).toEqual({
+      outcome: 'cancelled',
+    });
+    expect(failedRunFinish(new CliError('timed-out', 'stopped'))).toMatchObject({
+      outcome: 'failed',
+      errorKind: 'timed-out',
+    });
+    const stopped = {
+      outcome: { scanStatus: 'failed', policyStatus: 'failed', reason: 'killed', skipReason: '' },
+      knowledgeBase: { kind: 'diff', changed_files: 3 },
+    } as unknown as ScanResult;
+    expect(scannedRunFinish(stopped, 'SIGINT')).toEqual({ outcome: 'cancelled', changedFiles: 3 });
+    expect(scannedRunFinish(stopped, 'timeout')).toEqual({
+      outcome: 'failed',
+      errorKind: 'timed-out',
+      error: 'killed',
+      changedFiles: 3,
+    });
+    expect(scannedRunFinish(stopped, undefined)).toMatchObject({ errorKind: 'upstream' });
+  });
+
+  // The dashboard's Ctrl-C is a keypress to upstream, not a signal to the CLI: upstream stops
+  // itself and exits 130 or 143, as scanExitCode already counts it.
+  test("upstream's own interrupt cancels a run; the CLI's --timeout still fails it", () => {
+    const interrupted = (exitCode: number) =>
+      ({
+        exitCode,
+        outcome: {
+          scanStatus: 'failed',
+          policyStatus: 'not-evaluated',
+          reason: `upstream was interrupted (exit ${exitCode})`,
+          skipReason: '',
+        },
+        knowledgeBase: undefined,
+      }) as unknown as ScanResult;
+    expect(scannedRunFinish(interrupted(130), undefined)).toEqual({ outcome: 'cancelled' });
+    expect(scannedRunFinish(interrupted(143), undefined)).toEqual({ outcome: 'cancelled' });
+    expect(scannedRunFinish(interrupted(130), 'timeout')).toMatchObject({
+      outcome: 'failed',
+      errorKind: 'timed-out',
+    });
+    expect(scannedRunFinish(interrupted(2), undefined)).toMatchObject({
+      outcome: 'failed',
+      errorKind: 'upstream',
     });
   });
 });

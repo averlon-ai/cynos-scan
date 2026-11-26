@@ -22,6 +22,24 @@ function storeWith(commits: string[]) {
 const none = (): boolean => false;
 
 describe('LocalKnowledgeBaseStore', () => {
+  // A cache that cannot be written never fails the scan, so the store logs and carries on; the
+  // scan's telemetry hears of it, or it would record a save that never happened.
+  it('tells of a save it could not make, and carries on', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-store-'));
+    const logged: string[] = [];
+    const failed: string[] = [];
+    const store = new LocalKnowledgeBaseStore(
+      root,
+      message => logged.push(message),
+      step => failed.push(step)
+    );
+
+    await store.save(join(root, 'no-such-dir'), 'head', undefined);
+
+    expect(failed).toEqual(['cache_save']);
+    expect(logged.join('\n')).toContain('knowledge-base cache not saved');
+  });
+
   it("restores this commit's snapshot, else a preferred commit's, whatever is newer", async () => {
     const { store, dir } = storeWith(['base', 'head', 'newer']);
     expect(await store.restore(dir, 'head', ['base'], none)).toBe('head');

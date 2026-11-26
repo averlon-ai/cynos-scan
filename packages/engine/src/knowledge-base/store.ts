@@ -63,9 +63,16 @@ export const LOCAL_SNAPSHOTS = 20;
 export class LocalKnowledgeBaseStore implements KnowledgeBaseStore {
   private readonly snapshots: string;
 
+  /**
+   * @param log the store's own messages, such as a save that failed
+   * @param failed told of a save that failed, which the store logs and does not throw (a cache
+   *   that cannot be written never fails the scan), so the scan's telemetry records an error, not
+   *   a save
+   */
   constructor(
     root: string,
     private readonly log: (message: string) => void = () => {},
+    private readonly failed: (step: 'cache_save') => void = () => {},
     private readonly keep: number = LOCAL_SNAPSHOTS
   ) {
     this.snapshots = join(root, STORE_VERSION);
@@ -100,6 +107,7 @@ export class LocalKnowledgeBaseStore implements KnowledgeBaseStore {
       this.log(
         `knowledge-base cache not saved: ${error instanceof Error ? error.message : String(error)}`
       );
+      this.failed('cache_save');
       return;
     }
     this.log(`knowledge-base cache saved as ${sha}`);

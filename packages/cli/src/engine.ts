@@ -190,6 +190,39 @@ export interface KeyCheck {
 
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
+/** How a run ended, for its telemetry (the engine's telemetry.ts). */
+export interface RunFinish {
+  outcome: 'completed' | 'failed' | 'cancelled';
+  errorKind?: string;
+  error?: unknown;
+  changedFiles?: number;
+  productFiles?: number;
+}
+
+export interface TelemetryOptions {
+  key: string | undefined;
+  baseUrl?: string;
+  client: 'cli' | 'action';
+  clientVersion: string;
+  kind: 'full' | 'diff';
+  runtime: Runtime;
+  repository: string;
+  checkout?: string;
+  home?: string;
+  enabled?: boolean;
+  fetch?: Fetch;
+}
+
+/** One scan's telemetry: its start and finish, reported to cynos (the engine's telemetry.ts). */
+export interface ScanTelemetry {
+  readonly enabled: boolean;
+  progress(event: ScanEvent): void;
+  measureStore(store: KnowledgeBaseStore): KnowledgeBaseStore;
+  cacheFailed(step: 'cache_restore' | 'cache_save'): void;
+  started(): Promise<void>;
+  finished(finish: RunFinish): Promise<void>;
+}
+
 /** The engine as the CLI uses it. */
 export interface Engine {
   scanCheckout(config: ScanConfig, io: ScanIO): Promise<ScanResult>;
@@ -203,7 +236,8 @@ export interface Engine {
   resolveUpstream(): UpstreamInstall;
   LocalKnowledgeBaseStore: new (
     root: string,
-    log?: (message: string) => void
+    log?: (message: string) => void,
+    failed?: (step: 'cache_save') => void
   ) => KnowledgeBaseStore;
   checkKey(key: string, model: string, fetcher?: Fetch, baseUrl?: string): Promise<KeyCheck>;
   /** A refused check's failure, naming its cause, and that cause's fix. */
@@ -214,6 +248,9 @@ export interface Engine {
   ): { failure: string; fix: string };
   /** `docker kill` by name: the Docker daemon, not this process, owns a scan's containers. */
   killContainer(name: string): void;
+  ScanTelemetry: new (options: TelemetryOptions) => ScanTelemetry;
+  /** A git remote URL as `<host>/<owner>/<repo>`, or undefined for one that is not a URL. */
+  repositoryIdentity(remoteUrl: string): string | undefined;
   /** External text (model output, upstream's files) without control or bidi-override characters. */
   plain(value: string, limit?: number): string;
   DEFAULT_MODEL: string;

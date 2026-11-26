@@ -159,6 +159,32 @@ describe("the drafts, by upstream's draft tool schema", () => {
     );
   });
 
+  it('tell the lead that a draft after the accepted one neither reopens the scan nor removes findings', () => {
+    // A lead polished an accepted complete: true draft by changing a finding's identity, which
+    // added a finding; it then submitted complete: false with no findings to start over, which
+    // removed none, and the scan failed at completion ("The latest saved scan draft is
+    // incomplete"). upstream's workbench takes the scan's completeness from its last draft and
+    // retains earlier drafts' findings, matched to later versions by these three fields.
+    expect(
+      readFileSync(join(PLUGIN, 'scripts', 'workbench', 'retained_records.py'), 'utf8')
+    ).toContain('parts = [finding.get("ruleId"), identity, _finding_locations(finding)]');
+    // Both leads read final-report.md (the full scan's skill sends the lead there, the diff
+    // scan's start prints it), whose supported identity correction the workflow defers to.
+    const finalReport = readFileSync(join(PLUGIN, 'references', 'final-report.md'), 'utf8');
+    expect(finalReport).toContain('### Historical findings and coverage');
+    expect(finalReport).toContain(
+      "Put each distinct prior version directly in the revision's `provenance.previousFindings` array."
+    );
+    for (const kind of KINDS) {
+      const lead = leadFile(kind);
+      expect(lead).toContain("the scan's completeness is its last draft's, so a `complete: false`");
+      expect(lead).toContain('by its `ruleId`, `identity` and locations');
+      expect(lead).toContain('never submit an\n  empty or partial draft to start over');
+      expect(lead).toContain('correct it before the `complete: true` draft, never after');
+      expect(lead).not.toContain('fix it and submit again');
+    }
+  });
+
   it('names only review state fields upstream declares', () => {
     const named = [...TEMPLATE.matchAll(/reviewState\.(\w+)/g)].map(m => m[1]!);
     expect(named.length).toBeGreaterThan(0);

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 - 2026-11-26
+
+### Added
+
+- A scan that calls the model reports its start and finish to Cynos, with the scan's own key, so a failed or slow scan is seen without you reporting it. It sends the outcome, duration, scan kind, runtime, CLI version, each phase's status and duration, and the number of files scanned; on failure, the failed phase and its error message with the key, the checkout's path and the home directory removed. The repository is sent only as a hash, and no code or findings are sent. A mock scan and `--dry-run` send nothing, and a report that can't be sent never fails the scan. See [Scan telemetry](packages/cli/README.md#scan-telemetry).
+
+### Fixed
+
+- A native scan in a terminal no longer ends by asking "Open findings for review?", which opened a patch review cynos does not offer. The dashboard no longer reads the keyboard during a scan.
+- A scan no longer fails at the end with "The latest saved scan draft is incomplete" after resubmitting an already accepted draft. The scan's workflow now says that a later draft must be complete and must keep the findings already submitted.
+- A scan no longer slows to a crawl on a repository with very long runs of one character: a remote URL with many slashes, a C file with a long run of spaces or name characters, or a long minified line. These were read with patterns that took quadratic time on such input.
+
 ## 0.3.1 - 2026-11-24
 
 ### Fixed

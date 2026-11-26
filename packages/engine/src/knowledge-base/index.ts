@@ -88,7 +88,7 @@ export interface BuildPlan {
 /** Which step a line of the plan's log belongs to: the review's own lines, the packets, labels. */
 function planStep(message: string): ScanStep {
   if (message.startsWith('architecture review')) return 'review';
-  if (/\d+ packets\b/.test(message)) return 'packets';
+  if (/\b\d+ packets\b/.test(message)) return 'packets';
   return 'labels';
 }
 

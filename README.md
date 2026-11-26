@@ -86,6 +86,11 @@ To get a key, sign up at [app.cynos.averlon.ai](https://app.cynos.averlon.ai/) a
 **API keys**. `CYNOS_BASE_URL` points the CLI at a different Cynos endpoint, and
 `cynos auth status` shows which key and endpoint a scan will use.
 
+A scan that calls the model also reports its start and finish to Cynos with that key: its outcome,
+each phase's status and duration, and on failure the error's kind and a redacted message. The
+repository is sent only as a hash, and no code or findings are sent. See
+[Scan telemetry](packages/cli/README.md#scan-telemetry) for exactly what is sent.
+
 ## Quick start
 
 From the repository you want to scan:
