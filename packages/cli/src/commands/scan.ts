@@ -28,22 +28,25 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Option, type Command } from 'commander';
 import { cynosBaseUrl, cynosKey } from '../auth/keys';
-import { CLI_NAME, defaultModel, engineBaseUrl, type Context } from '../context';
+import { CLI_NAME, CLI_VERSION, defaultModel, engineBaseUrl, type Context } from '../context';
 import {
   assetsDir,
   engine,
   EngineUnavailable,
   type KnowledgeBaseStore,
+  type RunFinish,
   type Runtime,
   type ScanConfig,
   type ScanResult,
+  type ScanTelemetry,
 } from '../engine';
-import { CliError, scanExitCode, stopError } from '../exit-codes';
+import { CliError, errorKind, EXIT, scanExitCode, stopError } from '../exit-codes';
 import { withExamples } from '../help';
-import { createLocalIO } from '../local-io';
+import { createLocalIO, type StopCause } from '../local-io';
 import { HeadlessRenderer, LiveRenderer, type ProgressRenderer } from '../progress/renderers';
 import { PhaseTimings } from '../progress/timings';
 import {
@@ -60,6 +63,7 @@ import {
 import type { Terminal } from '../terminal';
 import { findingRows, readFindings } from './scans';
 import { sinceLastScan, type SinceLastScanDeps } from './since-last-scan';
+import { withoutTrailing } from '../text.js';
 
 export type ScanFormat = 'pretty' | 'json' | 'jsonl';
 
@@ -221,6 +225,9 @@ export async function scanCommand(
   const keys = [plan.cynosKey];
   const title = `${plan.kind === 'diff' ? `diff scan since ${plan.diffBase.slice(0, 12)}` : 'full scan'} of ${plan.project} · ${plan.runtime} runtime`;
   const renderer = progressRenderer(terminal, timings, title, plan.interactive);
+  // The run's start and finish, reported to cynos: it listens to the phases and the cache.
+  const telemetry = scanTelemetry(ctx, plan);
+  const store = knowledgeBaseStore(plan, stateDir, terminal, telemetry);
   const local = createLocalIO({
     terminal,
     renderer,
@@ -231,21 +238,25 @@ export async function scanCommand(
     ...(plan.runtime === 'docker'
       ? { killContainer: (name: string) => engine().killContainer(name) }
       : {}),
-    ...(knowledgeBaseStore(plan, stateDir, terminal) ?? {}),
-    ...(options.format === 'jsonl'
-      ? { onEvent: event => terminal.result(JSON.stringify(event)) }
-      : {}),
+    ...(store ? { knowledgeBaseStore: telemetry.measureStore(store.knowledgeBaseStore) } : {}),
+    onEvent: event => {
+      telemetry.progress(event);
+      if (options.format === 'jsonl') terminal.result(JSON.stringify(event));
+    },
   });
 
   // 3. The scan.
   let result: ScanResult;
+  await telemetry.started();
   try {
     result = await engine().scanCheckout(scanConfig(plan, options, runDir, runName), local.io);
   } catch (error) {
     // A failed run keeps its log and timings for `scans logs` and `debug bundle`; a stopped one fails as
     // its stop, whichever step the stop cut short.
     writePrivate(join(runDir, RUN_FILES.timings), timings.toJSON());
-    throw stopError(error, local.stoppedBy(), local.stopReason());
+    const stopped = stopError(error, local.stoppedBy(), local.stopReason());
+    await telemetry.finished(failedRunFinish(stopped));
+    throw stopped;
   } finally {
     local.close();
   }
@@ -265,6 +276,9 @@ export async function scanCommand(
   // upstream printed its TOKENS line on the terminal it had, after a scan it completed.
   const upstreamPrintedTokens = plan.interactive && result.outcome.scanStatus === 'completed';
   terminal.info(`\n${timings.summary(terminal.c, { upstreamPrintedTokens })}`);
+  // 6. The run's finish, reported last: the signal handlers are gone by now, so a Ctrl-C while
+  // the report waits (up to its 3-second timeout) must find the scan's result already saved.
+  await telemetry.finished(scannedRunFinish(result, local.stoppedBy()));
   return exitCode;
 }
 
@@ -439,13 +453,93 @@ function progressRenderer(
 function knowledgeBaseStore(
   plan: ScanPlan,
   stateDir: string,
-  terminal: Terminal
+  terminal: Terminal,
+  telemetry: ScanTelemetry
 ): { knowledgeBaseStore: KnowledgeBaseStore } | undefined {
   if (!plan.buildKnowledgeBase || !plan.callsModel) return undefined;
-  const store = new (engine().LocalKnowledgeBaseStore)(knowledgeBaseCacheDir(stateDir), message =>
-    terminal.debug(`knowledge-base cache: ${message}`)
+  // The store logs a save it could not make and carries on; telemetry is told, so it records an
+  // error rather than a save.
+  const store = new (engine().LocalKnowledgeBaseStore)(
+    knowledgeBaseCacheDir(stateDir),
+    message => terminal.debug(`knowledge-base cache: ${message}`),
+    step => telemetry.cacheFailed(step)
   );
   return { knowledgeBaseStore: store };
+}
+
+/**
+ * The run's telemetry (the engine's telemetry.ts): sent with the scan's own key, and only for a
+ * scan that calls the model, so a mock scan or a dry run sends nothing.
+ */
+export function scanTelemetry(ctx: Context, plan: ScanPlan): ScanTelemetry {
+  return new (engine().ScanTelemetry)({
+    key: plan.cynosKey,
+    baseUrl: plan.baseUrl,
+    client: 'cli',
+    clientVersion: CLI_VERSION,
+    kind: plan.kind,
+    runtime: plan.runtime,
+    repository: checkoutIdentity(plan.project),
+    checkout: plan.project,
+    home: homedir(),
+    enabled: plan.callsModel,
+    fetch: ctx.fetch,
+  });
+}
+
+/**
+ * The checkout's repository identity: its origin remote's `<host>/<owner>/<repo>`, as the action
+ * reports the same repository, else the checkout's path, so a laptop's runs of one directory still
+ * group together.
+ */
+export function checkoutIdentity(project: string, remote = originRemote(project)): string {
+  return (remote && engine().repositoryIdentity(remote)) || project;
+}
+
+function originRemote(project: string): string {
+  const remote = spawnSync('git', ['-C', project, 'remote', 'get-url', 'origin'], {
+    encoding: 'utf8',
+  });
+  return remote.status === 0 ? remote.stdout.trim() : '';
+}
+
+/**
+ * A run that returned, in scanExitCode's order:
+ *
+ *   completed            upstream completed the scan (a policy failure included)
+ *   the CLI's own stop   --timeout fails it as timed out; Ctrl-C or SIGTERM cancels it
+ *   upstream's own stop  the dashboard's Ctrl-C is a keypress to upstream, not a signal to the CLI,
+ *                        so upstream stops itself and exits 130 or 143: cancelled too
+ *   anything else        failed in upstream
+ */
+export function scannedRunFinish(result: ScanResult, stoppedBy: StopCause | undefined): RunFinish {
+  const size = runSize(result.knowledgeBase);
+  if (result.outcome.scanStatus === 'completed') return { outcome: 'completed', ...size };
+  if (stoppedBy === 'timeout')
+    return { outcome: 'failed', errorKind: 'timed-out', error: result.outcome.reason, ...size };
+  if (stoppedBy) return { outcome: 'cancelled', ...size };
+  if (result.exitCode === EXIT.interrupted || result.exitCode === EXIT.terminated)
+    return { outcome: 'cancelled', ...size };
+  return { outcome: 'failed', errorKind: 'upstream', error: result.outcome.reason, ...size };
+}
+
+/** A run that threw: a Ctrl-C or SIGTERM is cancelled; anything else, --timeout too, failed. */
+export function failedRunFinish(error: unknown): RunFinish {
+  const kind = errorKind(error);
+  if (kind === 'interrupted' || kind === 'terminated') return { outcome: 'cancelled' };
+  return { outcome: 'failed', errorKind: kind, error };
+}
+
+/** What the duration depends on: a diff's changed files, or a full scan's product files. */
+function runSize(summary: Record<string, unknown> | undefined): Partial<RunFinish> {
+  const count = (name: string): number | undefined =>
+    typeof summary?.[name] === 'number' ? summary[name] : undefined;
+  const changedFiles = count('changed_files');
+  const productFiles = count('product_files');
+  return {
+    ...(changedFiles === undefined ? {} : { changedFiles }),
+    ...(productFiles === undefined ? {} : { productFiles }),
+  };
 }
 
 /**
@@ -568,7 +662,7 @@ export function parseHostPaths(values: string[]): [string, string][] {
     if (!here || !host || !isAbsolute(here) || !isAbsolute(host) || rest.length)
       throw new CliError('usage', `--host-path takes /path/here=/path/on/host, not ${value}`);
     // Trailing slashes go, but the root stays the root.
-    return [here.replace(/\/+$/, '') || '/', host.replace(/\/+$/, '') || '/'];
+    return [withoutTrailing(here, '/') || '/', withoutTrailing(host, '/') || '/'];
   });
 }
 

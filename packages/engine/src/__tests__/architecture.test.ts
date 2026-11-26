@@ -264,6 +264,18 @@ describe('secretValues', () => {
     ]);
     expect([...values].sort()).toEqual(['Password123!', 'crm-jwt-secret-key-change-in-production']);
   });
+
+  // A minified line (a long `a.b.c…` chain) and a long run of spaces after `=` each made the
+  // pattern take quadratic time: seconds at these sizes, past the test's timeout.
+  it('reads a minified line and a long run of spaces in linear time', () => {
+    const minified = 'a.'.repeat(50_000);
+    const spaces = `token=${' '.repeat(100_000)}`;
+    const values = secretValues([
+      row('dist/app.min.js', `${minified}\n${spaces}\nconst API_KEY = 'k3y-0123456789';`),
+    ]);
+
+    expect([...values]).toEqual(['k3y-0123456789']);
+  });
 });
 
 describe('redactSecretLiterals', () => {

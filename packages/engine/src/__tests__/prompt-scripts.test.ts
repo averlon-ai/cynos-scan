@@ -103,7 +103,7 @@ describe('the workflows and their scripts', () => {
   it('put a shared section where a document includes it', () => {
     const part = withParts('# Workflow\n\n{{INCLUDE drafts.md}}\n\n## Next\n', PROMPT);
     expect(part).toStartWith('# Workflow\n\n## Drafts and finishing\n');
-    expect(part).toEndWith('never list, read or edit them afterwards.\n\n## Next\n');
+    expect(part).toEndWith('`provenance.previousFindings`).\n\n## Next\n');
     expect(() => withParts('{{INCLUDE missing.md}}', PROMPT)).toThrow('ENOENT');
   });
 });

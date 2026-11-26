@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 import { CliError } from '../exit-codes';
 import type { CredentialSource, Credentials } from './credential-store';
+import { withoutTrailing } from '../text.js';
 
 export const CYNOS_KEY_VARIABLE = 'CYNOS_API_KEY';
 /** The keychain account the one saved cynos key is kept under. */
@@ -50,5 +51,5 @@ export function fingerprint(key: string): string {
 
 /** The cynos endpoint: CYNOS_BASE_URL, else the engine's default. */
 export function cynosBaseUrl(env: NodeJS.ProcessEnv, fallback: string): string {
-  return (env['CYNOS_BASE_URL'] || fallback).replace(/\/+$/, '');
+  return withoutTrailing(env['CYNOS_BASE_URL'] || fallback, '/');
 }

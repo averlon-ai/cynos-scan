@@ -5,3 +5,11 @@ rules:
       policies:
         # Every action is pinned to a commit, ours included: a tag or a branch can be moved.
         '*': hash-pin
+  dangerous-triggers:
+    ignore:
+      # cynos-pr.yml's issue_comment, the comment request: the scan job runs only for a comment
+      # reading `cynos scan` from the owner, a member or a collaborator, on an open pull request
+      # from this repository that is not a draft, and the action refuses a fork's again. It checks
+      # out the pull request's head without credentials, and the key reaches only the scan, as on
+      # the pull_request trigger, which gives it to this repository's branches already.
+      - cynos-pr.yml

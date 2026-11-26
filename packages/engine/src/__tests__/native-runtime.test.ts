@@ -98,8 +98,9 @@ describe('the native scan command', () => {
     const interactive = runtime.scanCommand(layout, { ...OPTIONS, interactive: true }, 'scan');
     expect(interactive.argv).not.toContain('--headless');
     expect(interactive.argv).not.toContain('--json');
-    // stdin for its keys and stderr for its screen; stdout is still captured.
-    expect(interactive.stdio).toEqual(['inherit', 'pipe', 'inherit']);
+    // stderr for its screen and stdout still captured; no keyboard, so upstream cannot end the
+    // scan by asking to open its findings for patching.
+    expect(interactive.stdio).toEqual(['ignore', 'pipe', 'inherit']);
   });
 
   it('runs the preflight against a port nothing listens on, in its own workspace', () => {

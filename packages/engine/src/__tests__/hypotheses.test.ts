@@ -13,6 +13,7 @@ import {
   type HypothesisTemplate,
   type SourceFunction,
 } from '../hypotheses';
+import { globalWrites } from '../hypotheses/languages/c';
 import { functionBody, linesByPath, matchingBrace } from '../hypotheses/source';
 import { facts, reachedState } from '../hypotheses/templates/interrupted-request/facts';
 import { briefing } from '../knowledge-base/briefing';
@@ -331,6 +332,16 @@ describe('guarded teardowns', () => {
 });
 
 describe('reached state', () => {
+  // A long run of name characters, as in a generated file's data, made the hook-install pattern
+  // rescan the run from each of its characters: seconds at this size, past the test's timeout.
+  it('reads a file with a long run of name characters in linear time', () => {
+    const run = 'a'.repeat(100_000);
+    const padded = interpreterInput();
+    padded.files = padded.files.map(f => ({ ...f, text: `${f.text}\n${run}` }));
+
+    expect(facts(padded)).toEqual(facts(interpreterInput()));
+  });
+
   it("finds other components' global writes behind macros and outside the code graph", () => {
     // session.c reaches the serializer through a macro; its definition is in an re2c source the
     // graph does not parse.
@@ -621,5 +632,29 @@ describe('hypothesisPackets', () => {
     expect(claims(hypothesisPackets(hypotheses.slice(0, 2), 3))).toEqual([['S1'], ['H1']]);
     expect(hypothesisPackets(hypotheses, 0)).toEqual([]);
     expect(hypothesisPackets([], 3)).toEqual([]);
+  });
+});
+
+describe('globalWrites', () => {
+  it("reads a file's statics, not its prototypes or inline functions", () => {
+    const file = [
+      'static int depth;',
+      'static char buf[64] = {0};',
+      'static const char *name = "x";',
+      'static struct state *current;',
+      'static int f(void);',
+      'static inline int g(void) { return 0; }',
+    ].join('\n');
+    const body = 'depth = 1; name = "y"; current++; f = 2; g--; buf[0] = 1;';
+
+    expect(globalWrites(body, file)).toEqual(['depth', 'name', 'current']);
+  });
+
+  // A regex read the spaces after each candidate name two ways, so this prototype took quadratic
+  // time: seconds at this size, past the test's timeout.
+  it('reads a prototype with a long run of spaces in linear time', () => {
+    const file = `static int f${' '.repeat(100_000)}(void);\nstatic int depth;`;
+
+    expect(globalWrites('depth = 1;', file)).toEqual(['depth']);
   });
 });

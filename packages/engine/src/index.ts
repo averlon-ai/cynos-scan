@@ -13,6 +13,7 @@
  *   host        checkHost and fixHost: doctor and the scan's preflight
  *   progress    the scan's progress events
  *   knowledge   the knowledge base's store and summary types, as run.json and result.json record them
+ *   telemetry   ScanTelemetry: the run's start and finish, reported to cynos
  *   bench       benchMain, the benchmark CLI (build-image, scan, doctor)
  *   action      what the action's own steps share with the scan: the outcome and report rules,
  *               the stage's cleanup, report and log helpers
@@ -106,6 +107,18 @@ export {
   defaultToolCache,
   ensureCodeGraphBinary,
 } from './knowledge-base/code-graph-binary';
+
+// telemetry
+export {
+  repoHash,
+  repositoryIdentity,
+  ScanTelemetry,
+  type CacheStep,
+  type RunFinish,
+  type StepStatus,
+  type TelemetryOptions,
+  type TelemetryStep,
+} from './telemetry';
 
 // bench
 export { benchMain } from './bench/cli';

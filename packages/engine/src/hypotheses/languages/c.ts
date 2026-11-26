@@ -15,7 +15,7 @@ export const C_FAMILY = /\.(c|h|cc|cpp|cxx|hh|hpp|hxx|m|mm|inc)$/i;
 /** Sources a definition can be in, including the generated lexers' and parsers' own sources. */
 const C_SOURCES = /\.(c|cc|cpp|re|y|l)$/;
 const JUMP = /\b(?:sig|_)?longjmp\s*\(/;
-const DEFINE = /^\s*#\s*define\s+([A-Za-z_]\w*)(\([^)]*\))?(.*)$/;
+const DEFINE = /^\s*#\s*define\s+([A-Za-z_]\w*)(?!\w)(\([^)]*\))?(.*)$/;
 /** A global reached through an accessor macro: `X(name)`, `X(name).field` or `X(name)->field`. */
 const ACCESSOR = String.raw`[A-Z][A-Z0-9_]*\(\w+\)(?:(?:\.|->)\w+)*`;
 /** An accessor written: `=` (not `==`), `++`, `--`, or `memset(&X(name)...`. */
@@ -23,9 +23,6 @@ const ACCESSOR_WRITE = new RegExp(
   String.raw`\b(${ACCESSOR})\s*(?:=(?!=)|\+\+|--)|(?:\+\+|--)\s*(${ACCESSOR})|memset\s*\(\s*&\s*(${ACCESSOR})`,
   'g'
 );
-const FILE_STATIC =
-  /^static\s+(?!inline\b)[^;(){}]*?\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:=[^;]*)?;/gm;
-
 export function isC(path: string): boolean {
   return C_FAMILY.test(path);
 }
@@ -107,12 +104,94 @@ export function globalWrites(body: string, fileText: string): string[] {
   const code = withoutComments(body);
   const out = new Set<string>();
   for (const m of code.matchAll(ACCESSOR_WRITE)) out.add((m[1] ?? m[2] ?? m[3]) as string);
-  for (const m of fileText.matchAll(FILE_STATIC)) {
-    const name = m[1] as string;
+  for (const name of fileStatics(fileText)) {
     if (new RegExp(String.raw`\b${name}\s*(?:=(?!=)|\+\+|--)|(?:\+\+|--)\s*${name}\b`).test(code))
       out.add(name);
   }
   return [...out];
+}
+
+/**
+ * The file-scope statics a C file declares, by name: `static int depth;`,
+ * `static char buf[64] = {0};`, `static const char *name = "x";`, but not a prototype
+ * (`static int f(void);`) or a `static inline` function.
+ *
+ * A declaration is a line that starts with `static`; its name is the first identifier before any
+ * `;`, parenthesis or brace that is followed, past spaces and an array size, by `=` or `;`. This is
+ * read with a scan, not one regex: a regex reads the spaces after each candidate name two ways (before
+ * or after the optional array size), so a prototype with a long run of spaces before its `(` took
+ * quadratic time (half a second at 32,000 spaces on Node), once for every function body read.
+ */
+function fileStatics(fileText: string): string[] {
+  const names: string[] = [];
+  const next = nextIndexOf(fileText);
+  for (const start of staticDeclarationStarts(fileText)) {
+    const name = declaredName(fileText, start, next);
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/** Where each `static` declaration's text starts: past `static` and its spaces, not `inline`. */
+function* staticDeclarationStarts(text: string): Generator<number> {
+  for (const m of text.matchAll(/^static\s+/gm)) {
+    const start = m.index + m[0].length;
+    if (!/^inline\b/.test(text.slice(start, start + 7))) yield start;
+  }
+}
+
+/**
+ * The name a declaration starting at `start` declares: the first identifier, before any `;`,
+ * parenthesis or brace, that is followed (past spaces and an optional `[size]`) by `=` and a later
+ * `;`, or by `;`. Each identifier skips only the spaces after it, so the scan is linear.
+ */
+function declaredName(
+  text: string,
+  start: number,
+  next: (char: string, from: number) => number
+): string | undefined {
+  for (let i = start; i < text.length && !';(){}'.includes(text[i] as string); i++) {
+    if (!isIdentifierStart(text, i)) continue;
+    let end = i + 1;
+    while (end < text.length && /\w/.test(text[end] as string)) end++;
+    let after = skipSpaces(text, end);
+    // An array size: `[` up to the next `]`. With no `]`, this name declares nothing.
+    if (text[after] === '[') {
+      const close = next(']', after);
+      after = close < 0 ? -1 : skipSpaces(text, close + 1);
+    }
+    if (text[after] === ';' || (text[after] === '=' && next(';', after) >= 0))
+      return text.slice(i, end);
+    i = end - 1;
+  }
+  return undefined;
+}
+
+/** An identifier starts at `i`: a letter or `_` with no word character before it. */
+function isIdentifierStart(text: string, i: number): boolean {
+  return /[A-Za-z_]/.test(text[i] as string) && (i === 0 || !/\w/.test(text[i - 1] as string));
+}
+
+function skipSpaces(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && /\s/.test(text[i] as string)) i++;
+  return i;
+}
+
+/**
+ * `text.indexOf(char, from)`, remembering the last answer for each character: a later question
+ * from no earlier position has the same answer while it lies ahead, so a file with many `[` and no
+ * `]` is searched once, not once per `[`.
+ */
+function nextIndexOf(text: string): (char: string, from: number) => number {
+  const last = new Map<string, { from: number; found: number }>();
+  return (char, from) => {
+    const known = last.get(char);
+    if (known && from >= known.from && (known.found < 0 || known.found >= from)) return known.found;
+    const found = text.indexOf(char, from);
+    last.set(char, { from, found });
+    return found;
+  };
 }
 
 /** For each function-like macro, the names its body calls: a call through it reaches those too. */

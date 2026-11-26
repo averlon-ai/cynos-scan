@@ -147,6 +147,26 @@ The cause is on stderr, and with `--format json` in `error.kind` (`usage`, `auth
 `timed-out`, `internal`). `auth` is a key cynos does not know; `budget` a key whose budget is spent;
 `model` a model cynos cannot serve for the key; `network` cynos unreachable; `gateway` cynos failing.
 
+## Scan telemetry
+
+A scan that calls the model reports its start and its finish to Cynos, with the scan's own key
+and endpoint, so a scan that fails or slows down is seen without you reporting it. It sends:
+
+- the run's outcome (completed, failed or cancelled) and duration, the scan kind (full or diff),
+  the runtime and the CLI's version;
+- each phase's status and duration, and whether the knowledge-base cache was a hit, a miss or
+  failed;
+- the number of changed files (diff) or product files (full);
+- on failure, the phase that failed, the error's kind, and its message with the key, the
+  checkout's path and the home directory removed, cut to 500 characters. A message can still name
+  a file inside the checkout.
+
+The repository is sent only as a hash of `<host>/<owner>/<repo>` from its `origin` remote, or of
+the checkout's path when it has no such remote. No code or findings are sent. A mock scan and
+`--dry-run` send nothing. Each report is one attempt with a 3-second timeout: a report that cannot
+be sent is dropped, delays the scan's start or its exit by at most those 3 seconds, and never
+fails the scan.
+
 ## Where files go
 
 | Path | What |
